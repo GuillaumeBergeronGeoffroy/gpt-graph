@@ -1,5 +1,7 @@
-function renderGraph(neo4jJson) {
+function renderGraph(neo4jJson, history = false) {
   neo4jJson = JSON.parse(JSON.stringify(neo4jJson));
+
+  !history && addToHistory(neo4jJson);
 
   // Remove any existing graph before rendering
   d3.select("#graph").selectAll("svg").remove();

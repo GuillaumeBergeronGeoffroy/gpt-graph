@@ -1,4 +1,5 @@
 let unmerged_object = merged_object = nodePrompt = null;
+
 function handleFocus(event) {
     addGeneratePrompt(nodePrompt);
 }

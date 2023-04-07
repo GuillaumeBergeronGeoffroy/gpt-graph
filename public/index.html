@@ -30,6 +30,7 @@
   <script src="dragElement.js"></script>
   <script src="prompt.js"></script>
   <script src="settings.js"></script>
+  <script src="history.js"></script>
   <script src="apiKey.js"></script>
 </body>
 </html>
@@ -42,6 +43,7 @@
     registerSettingsListeners();
     registerApiKeyListeners();
     loadApiKey();
+    initializeHistoryFromLocalStorage();
   });
 </script>
 
@@ -100,7 +102,7 @@
     min-width:250px;
     max-width:600px;
     left: 50%;
-    top:calc(70vh);
+    top:calc(50vh);
     transform: translateX(-50%);
     font-size: 18px;
     color: #FFF;
