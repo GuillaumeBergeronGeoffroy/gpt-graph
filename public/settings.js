@@ -12,10 +12,8 @@ function registerSettingsListeners() {
                 setting.classList.add('active');
             });
             setTimeout(() => {
-                window.scrollTo({
-                    top: document.body.scrollHeight,
-                    behavior: 'smooth'
-                });
+                // scroll to center of api-key id div
+                document.getElementById('api-key').scrollIntoView({behavior: 'smooth', block: 'center'});
             }, 500);
         } else {
             settingsImg.src = 'img/gear.png';
