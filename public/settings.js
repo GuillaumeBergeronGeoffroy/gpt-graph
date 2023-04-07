@@ -1,5 +1,7 @@
+let apiKey = null
+
 // add event listener on settings image click toggle image to another image or original image
-registerSettingsListeners = function() { 
+function registerSettingsListeners() { 
     document.querySelector('.settings-img').addEventListener('click', () => {
         const settingsImg = document.querySelector('.settings-img');
         if(settingsImg.src.includes('img/gear.png')) {
