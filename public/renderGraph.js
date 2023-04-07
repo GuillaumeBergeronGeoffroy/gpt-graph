@@ -1,32 +1,6 @@
-let neo4jJson = {
-  "nodes":[
-  {"id":0,"labels":["Concept"],"properties":{"name":"Activity/Action","description":"An activity or action is a system of human 'doing' or intentional behavior, whereby a subject or agent works on an object in order to obtain a desired outcome or achieve goals in a particular situation."}},
-  {"id":1,"labels":["Concept"],"properties":{"name":"Subject/Agent","description":"The subject or agent is the person or entity performing the activity or action."}},
-  {"id":2,"labels":["Concept"],"properties":{"name":"Object","description":"The object is the thing or idea being acted upon."}},
-  {"id":3,"labels":["Concept"],"properties":{"name":"Tool","description":"The tool is the instrument used to perform the activity."}},
-  {"id":4,"labels":["Concept"],"properties":{"name":"Outcome/Intention","description":"The outcome or intention is the result of the activity or the agent's aims and goals."}},
-  {"id":5,"labels":["Concept"],"properties":{"name":"Beliefs and Desires","description":"Beliefs and desires are typically used to explain action."}},
-  {"id":6,"labels":["Concept"],"properties":{"name":"Efficient Cause","description":"Efficient cause is the agent who causes the action."}},
-  {"id":7,"labels":["Concept"],"properties":{"name":"Final Cause","description":"Final cause is the intention of the action."}},
-  {"id":8,"labels":["Concept"],"properties":{"name":"Rationality","description":"Rationality is the ability to respond to reasons and calculate the best means to achieve goals."}},
-  {"id":9,"labels":["Concept"],"properties":{"name":"Free Will","description":"Free will is the ability to choose one's own actions."}},
-  {"id":10,"labels":["Concept"],"properties":{"name":"Bodily Movements","description":"Bodily movements are physical movements of the body."}}
-  ],
-  "relationships":[
-  {"id":0,"startNodeId":0,"endNodeId":1,"type":"INVOLVES","properties":{}},
-  {"id":1,"startNodeId":0,"endNodeId":2,"type":"ACT_ON","properties":{}},
-  {"id":2,"startNodeId":0,"endNodeId":3,"type":"USES","properties":{}},
-  {"id":3,"startNodeId":0,"endNodeId":4,"type":"ACHIEVE","properties":{}},
-  {"id":4,"startNodeId":0,"endNodeId":5,"type":"EXPLAINED_BY","properties":{}},
-  {"id":5,"startNodeId":4,"endNodeId":7,"type":"IS_FINAL_CAUSE","properties":{}},
-  {"id":6,"startNodeId":1,"endNodeId":6,"type":"CAUSES_ACTION","properties":{}},
-  {"id":7,"startNodeId":5,"endNodeId":8,"type":"CONTRIBUTES_TO","properties":{}},
-  {"id":8,"startNodeId":4,"endNodeId":9,"type":"RELATED_TO","properties":{}},
-  {"id":9,"startNodeId":0,"endNodeId":10,"type":"INVOLVES","properties":{}}
-  ]
-};
-
 function renderGraph(neo4jJson) {
+  neo4jJson = JSON.parse(JSON.stringify(neo4jJson));
+
   // Remove any existing graph before rendering
   d3.select("#graph").selectAll("svg").remove();
   const svg = d3.select("#graph")

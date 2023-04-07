@@ -14,7 +14,6 @@
     <div id="prompt-dragable-top" class="dragable-top"><img src="img/drag.png"/> </div>
     <div id="text-container" contenteditable="true">
       Enter text here
-      <span class="submit-prompt" contenteditable="false">Synthesise</span>
     </div>
     <div id='params-container'>
         <div id="download-button" class="prompt buttons" onclick="downloadTree()"><span>Download (CMD + S)</span></div>
@@ -43,7 +42,6 @@
     registerSettingsListeners();
     registerApiKeyListeners();
     loadApiKey();
-    renderGraph(neo4jJson);
   });
 </script>
 
@@ -75,12 +73,13 @@
     z-index: 1;
     top: 0px;
     left:0;
-    height:24px;
-    width: 100%;
+    height:30px;
+    width: 30px;
+    border-radius: 300px;
     background: #741fe4;
-    width: 50%;
     left: 50%;
     transform: translateX(-50%);
+    top:50px;
     cursor: move;
   }
   #graph {
@@ -126,8 +125,9 @@
     margin: 0;
     padding: 0;
     position: absolute;
-    top: 3px;
-    right: 5px;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
     /* transform: translateX(-50%); */
   }
   #prompt-container #text-container {
