@@ -48,6 +48,12 @@ function registerPromptListeners() {
     nodePrompt.addEventListener('focus', handleFocus);
     nodePrompt.addEventListener('input', handleInput);
     nodePrompt.addEventListener('paste', handlePaste);
+    nodePrompt.addEventListener('keydown', function(event) {
+        if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+            event.preventDefault();
+            getObject();
+        }
+    });
 }
 
 function getBasePrompt() {

@@ -16,13 +16,13 @@
       Enter text here
     </div>
     <div id='params-container'>
-        <div id="download-button" class="prompt buttons" onclick="downloadTree()"><span>Download (CMD + S)</span></div>
+        <div id="download-button" class="prompt buttons" onclick="downloadGraph()"><span>Download (CMD + S)</span></div>
         <img class="settings-img" src="img/gear.png" />
     </div>
     <div id='api-key' class="prompt setting-prompt" contenteditable="true">Enter OpenAI API Key here</div>
-    <div id="import-button" class="prompt buttons" onclick="document.getElementById('import-tree').click()">Import (CMD + I)</div>
-    <input type="file" id="import-tree" style="display: none;" onchange="importTree(this.files[0])">
-    <div id="clear-button" class="prompt buttons" onclick="clearTree()">Clear (CMD + ESC)</div>
+    <div id="import-button" class="prompt buttons" onclick="document.getElementById('import-graph').click()">Import (CMD + I)</div>
+    <input type="file" id="import-graph" style="display: none;" onchange="importTree(this.files[0])">
+    <div id="clear-button" class="prompt buttons" onclick="clearHistory()">Clear (CMD + ESC)</div>
   </div>
   
   <script src="https://d3js.org/d3.v7.min.js"></script>
@@ -31,7 +31,8 @@
   <script src="prompt.js"></script>
   <script src="settings.js"></script>
   <script src="history.js"></script>
-  <script src="apiKey.js"></script>
+  <script src="download.js"></script>
+  <script src="import.js"></script>
 </body>
 </html>
 
@@ -44,6 +45,11 @@
     registerApiKeyListeners();
     loadApiKey();
     initializeHistoryFromLocalStorage();
+    document.addEventListener('keydown', function(event) {
+      handleImportEvents(event);
+      handleDownloadEvents(event);
+      handleHistoryEvents(event);
+    });
   });
 </script>
 
