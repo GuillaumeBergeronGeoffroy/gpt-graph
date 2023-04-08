@@ -118,6 +118,8 @@ function getVisibleText( node ) {
 }
 
 function getObject(recursive = 1) {
+    setLoading();
+
     let prompt = getBasePrompt();
 
     fetch("https://api.openai.com/v1/engines/text-davinci-003/completions", {
@@ -138,6 +140,7 @@ function getObject(recursive = 1) {
     .then(data => {
         if(data.error) {
             console.log(data.error);
+            unsetLoading();
             return;
         }
         // check if first char is { and last char is }
@@ -152,6 +155,7 @@ function getObject(recursive = 1) {
             console.log(error)
             if(recursive > 0) {
                 console.log('Error parsing completions data');
+                unsetLoading();
                 return;
             }
             getObject(recursive + 1);
@@ -159,6 +163,7 @@ function getObject(recursive = 1) {
     })
     .catch(error => {
         console.log(error)
+        unsetLoading();
     });
 }
 
@@ -166,6 +171,7 @@ function mergeObjects(recursive = 1) {
     if(!merged_object) {
         merged_object = unmerged_object;
         renderGraph(merged_object);      
+        unsetLoading();
         return
     }
     let prompt = getMergePrompt();
@@ -188,6 +194,7 @@ function mergeObjects(recursive = 1) {
     .then(data => {
         if(data.error) {
             console.log(data.error);
+            unsetLoading();
             return;
         }
         // check if first char is { and last char is }
@@ -197,11 +204,13 @@ function mergeObjects(recursive = 1) {
             data.choices[0].text = '{' + data.choices[0].text + ']}';
             merged_object = parseJsonString(data.choices[0].text);
             
-            renderGraph(merged_object);         
+            renderGraph(merged_object);       
+            unsetLoading();  
         } catch (error) {
             console.log(error)
             if(recursive > 0) {
                 console.log('Error parsing completions data');
+                unsetLoading();
                 return;
             }
             mergeObjects(recursive + 1);
@@ -210,4 +219,12 @@ function mergeObjects(recursive = 1) {
     .catch(error => {
         console.log(error)
     });
+}
+
+function setLoading() {
+    document.getElementById('prompt-container').classList.add('loading');
+}
+
+function unsetLoading() {
+    document.getElementById('prompt-container').classList.remove('loading');
 }

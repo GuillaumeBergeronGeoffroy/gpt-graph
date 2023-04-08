@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GPT-GRAPH</title>
+  <!-- register css/lds-ellipsis -->
+  <link rel="stylesheet" href="css/lds-ellipsis.css">
 </head>
 <body>
   <div id="graph-container">
@@ -11,6 +13,7 @@
     <div id="graph"></div>
   </div>
   <div id="prompt-container">
+    <div class="lds-ellipsis"><div></div><div></div><div></div><div></div></div>    
     <div id="prompt-dragable-top" class="dragable-top"><img src="img/drag.png"/> </div>
     <div id="text-container" contenteditable="true">
       Enter text here
@@ -114,6 +117,20 @@
     color: #FFF;
     font-family: 'Courier New', Courier, monospace;
     padding-top:20px;
+  }
+  #prompt-container.loading {
+    pointer-events: none !important;
+  }
+  /* all children of #prompt-container but not lds-hourglass */
+  #prompt-container.loading > :not(.lds-ellipsis) {
+    opacity:0.85;
+    filter:contrast(0.55); 
+  }
+  #prompt-container.loading .lds-ellipsis {
+    opacity:1;
+  }
+  #prompt-container.loading #prompt-dragable-top img {
+    opacity:0;
   }
   #prompt-container #prompt-dragable-top {
     position: absolute;
