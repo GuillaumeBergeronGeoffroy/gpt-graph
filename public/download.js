@@ -8,10 +8,17 @@ function handleDownloadEvents(event) {
 
 // download tree as json file with name tree.json
 function downloadGraph() {
-    graphHistory = {
+    const graphName = document.getElementById('current-graph-name')?.textContent || 'graph';
+    const safeName = graphName.replace(/[^a-z0-9]/gi, '-').toLowerCase();
+
+    const graphData = {
+        name: graphName,
         merged_object_history,
-    }
-    download(JSON.stringify(graphHistory), 'graph.json');
+        activityLog: typeof getActivityLog === 'function' ? getActivityLog() : [],
+        chatHistory: typeof chatHistory !== 'undefined' ? chatHistory : [],
+        exportedAt: new Date().toISOString()
+    };
+    download(JSON.stringify(graphData, null, 2), `${safeName}.json`);
 }
 
 // just the download function receiving a content and a filename
