@@ -1695,6 +1695,35 @@ Task types:
 - "research": Gather information, analyze concepts, add findings to graph
 - "implement": Create actual code, files, repositories - use this when user wants you to BUILD something
 
+CRITICAL — Graph output contract:
+You are operating inside a graph visualization tool. When "addToGraph" is true, the task's response text is parsed to extract a \`\`\`graph\`\`\` fenced code block. If the block is missing or malformed, the work WILL NOT appear in the graph — it will be lost.
+
+When "addToGraph" is true, you MUST append the following instruction verbatim to the end of the task's "prompt" field:
+
+---BEGIN GRAPH OUTPUT INSTRUCTION---
+You are operating inside a graph visualization tool. Your response will be parsed by the tool to extract graph data.
+At the END of your response, you MUST output ALL graph nodes and relationships as a single JSON code block using this EXACT fence:
+
+\`\`\`graph
+{
+  "nodes": [
+    {"id": 1, "labels": ["Category"], "properties": {"name": "Node Name", "description": "What this node represents"}}
+  ],
+  "relationships": [
+    {"startNodeId": 1, "endNodeId": 2, "type": "RELATES_TO", "properties": {}}
+  ]
+}
+\`\`\`
+
+Rules:
+- The fence MUST be \`\`\`graph (not \`\`\`json, not \`\`\`graphql — exactly \`\`\`graph)
+- Every node MUST have: id (unique integer), labels (array of strings), properties.name, properties.description
+- Every relationship MUST have: startNodeId (integer matching a node id), endNodeId (integer matching a node id), type (string), properties (object)
+- Include ALL nodes and relationships — not a sample, not a summary, the complete graph
+- This block is NOT optional. Without it, none of your work will appear in the tool.
+- Writing files to disk is fine as a secondary artifact, but the \`\`\`graph\`\`\` block in your response is the primary delivery mechanism.
+---END GRAPH OUTPUT INSTRUCTION---
+
 Only use tasks when genuinely helpful. For simple questions, just answer directly.
 For implementation requests (code, repos, projects), ALWAYS use type "implement".
 
@@ -1852,11 +1881,15 @@ function executeResearchTask(task, taskId) {
     const taskPrompt = task.addToGraph
         ? `${task.prompt}
 
-IMPORTANT: If you discover new concepts, entities, or relationships, output them at the end in this JSON format:
+CRITICAL OUTPUT REQUIREMENT: You are operating inside a graph visualization tool. Your response will be parsed to extract graph data and render it in the UI. You MUST output the graph as a JSON code block at the END of your response using this exact format:
+
 \`\`\`graph
-{"nodes":[{"id":1,"labels":["Type"],"properties":{"name":"...","description":"..."}}],"relationships":[]}
+{"nodes":[{"id":1,"labels":["Type"],"properties":{"name":"...","description":"..."}}],"relationships":[{"startNodeId":1,"endNodeId":2,"type":"RELATES_TO","properties":{}}]}
 \`\`\`
-`
+
+This is NOT optional. If you do not include this block, your work will not appear in the graph. Do not only write files to disk — the graph JSON in your response is the primary delivery mechanism.
+Every node must have: id (integer), labels (array of strings), properties (object with at least "name" and "description").
+Every relationship must have: startNodeId, endNodeId, type, properties.`
         : task.prompt;
 
     fetch("http://localhost:8765/v1/completions", {
@@ -1900,6 +1933,17 @@ function executeImplementationTask(task, taskId) {
     const projectName = task.projectName || 'project-' + Date.now();
     const workingDir = `~/claude-projects/${projectName}`;
 
+    const graphOutputInstruction = task.addToGraph ? `
+8. CRITICAL — GRAPH OUTPUT: You are operating inside a graph visualization tool. At the END of your response, you MUST output all knowledge graph data as a JSON code block so the UI can render it:
+
+\`\`\`graph
+{"nodes":[{"id":1,"labels":["Type"],"properties":{"name":"...","description":"..."}}],"relationships":[{"startNodeId":1,"endNodeId":2,"type":"RELATES_TO","properties":{}}]}
+\`\`\`
+
+Every node needs: id (integer), labels (array), properties (object with "name" and "description").
+Every relationship needs: startNodeId, endNodeId, type, properties.
+This is NOT optional — without this block, your work will not appear in the graph.` : '';
+
     const implementPrompt = `You are implementing a software project. Create all necessary files and code.
 
 PROJECT: ${projectName}
@@ -1915,7 +1959,7 @@ INSTRUCTIONS:
 4. Create any necessary configuration files
 5. If it's a Python project, include requirements.txt
 6. If it's a Node project, include package.json
-7. Implement the full solution, not just scaffolding
+7. Implement the full solution, not just scaffolding${graphOutputInstruction}
 
 Begin implementation:`;
 
@@ -1927,7 +1971,8 @@ Begin implementation:`;
             prompt: implementPrompt,
             working_dir: workingDir,
             model: "claude-opus-4-5-20251101",
-            async: true
+            async: true,
+            graph_id: currentGraphId || 'default'
         })
     })
     .then(response => response.json())
@@ -1967,7 +2012,7 @@ function pollTaskStatus(localTaskId, serverTaskId, originalTask, projectName) {
     const pollInterval = setInterval(() => {
         fetch(`http://localhost:8765/v1/tasks/${serverTaskId}`)
             .then(response => response.json())
-            .then(data => {
+            .then(async data => {
                 // Update task with live info
                 const taskMsg = chatHistory.find(msg => msg.role === 'task' && msg.taskId === localTaskId);
                 if (taskMsg) {
@@ -2009,20 +2054,68 @@ function pollTaskStatus(localTaskId, serverTaskId, originalTask, projectName) {
                         serverTaskId: serverTaskId
                     });
 
+                    // Auto-pull from server — task may have written to graph via API
+                    try {
+                        const pullResult = await pullFromServer();
+                        if (pullResult?.added > 0) {
+                            console.log(`Auto-pulled ${pullResult.added} nodes from server after implementation task`);
+                        }
+                    } catch (e) {
+                        console.warn('Auto-pull after implementation task failed:', e);
+                    }
+
                     // Add to graph if requested
                     if (originalTask.addToGraph) {
-                        const graphNodes = [{
-                            id: 1000,
-                            labels: ['Project'],
-                            properties: {
-                                name: projectName,
-                                description: originalTask.description,
-                                path: result.working_dir,
-                                files: (result.files || []).slice(0, 10).join(', ')
+                        // Try to parse graph data from the response first
+                        const responseText = result.response || '';
+                        const graphMatch = responseText.match(/```graph\s*\n?([\s\S]*?)```/);
+                        let graphParsed = false;
+
+                        if (graphMatch) {
+                            try {
+                                const graphData = JSON.parse(graphMatch[1].trim());
+                                if (graphData.nodes && graphData.nodes.length > 0) {
+                                    mergeNewNodes(graphData, null, 'task-implementation');
+                                    renderGraph(merged_object);
+                                    graphParsed = true;
+                                }
+                            } catch (e) {
+                                console.warn('Failed to parse graph data from implementation task:', e);
                             }
-                        }];
-                        mergeNewNodes({ nodes: graphNodes, relationships: [] }, null, 'implementation');
-                        renderGraph(merged_object);
+                        }
+
+                        // Fallback: if no graph block found, try parsing any JSON block with nodes/relationships
+                        if (!graphParsed) {
+                            const jsonMatch = responseText.match(/```(?:json)?\s*\n?([\s\S]*?\{[\s\S]*?"nodes"[\s\S]*?\})\s*```/);
+                            if (jsonMatch) {
+                                try {
+                                    const graphData = JSON.parse(jsonMatch[1].trim());
+                                    if (graphData.nodes && graphData.nodes.length > 0) {
+                                        mergeNewNodes(graphData, null, 'task-implementation');
+                                        renderGraph(merged_object);
+                                        graphParsed = true;
+                                    }
+                                } catch (e) {
+                                    console.warn('Failed to parse JSON graph fallback:', e);
+                                }
+                            }
+                        }
+
+                        // Last resort: create a stub project node
+                        if (!graphParsed) {
+                            const graphNodes = [{
+                                id: 1000,
+                                labels: ['Project'],
+                                properties: {
+                                    name: projectName,
+                                    description: originalTask.description,
+                                    path: result.working_dir,
+                                    files: (result.files || []).slice(0, 10).join(', ')
+                                }
+                            }];
+                            mergeNewNodes({ nodes: graphNodes, relationships: [] }, null, 'implementation');
+                            renderGraph(merged_object);
+                        }
                     }
 
                 } else if (data.status === 'failed') {
@@ -2255,11 +2348,13 @@ ${graphContext}
 USER REQUEST: ${userPrompt}
 
 INSTRUCTIONS:
-1. Read and understand the target codebase
-2. Use concepts from the knowledge graph to inform your implementation
-3. Write clean, well-structured code following existing patterns
-4. Actually create/modify files - this is an IMPLEMENTATION task, not analysis
-5. After implementation, return a brief JSON summary:
+1. First, read the graph summary (curl http://localhost:8765/v1/graph/summary) to understand the domain context
+2. Read the full graph if you need detailed architecture or relationship info
+3. Read and understand the target codebase
+4. Write clean, well-structured code following existing patterns
+5. Actually create/modify files - this is an IMPLEMENTATION task, not analysis
+6. As you implement, merge new discoveries (new modules, patterns, decisions) into the graph via the merge API
+7. After implementation, return a brief JSON summary:
 
 {"summary": "What you implemented and where", "nodes": [], "relationships": []}
 
@@ -2273,10 +2368,12 @@ ${graphContext}
 USER REQUEST: ${userPrompt}
 
 INSTRUCTIONS:
-1. Research the topic thoroughly (use web search if needed)
-2. Identify key concepts, mechanisms, and relationships
-3. Connect findings to existing graph nodes where relevant
-4. Return findings as structured JSON for the graph:
+1. First, read the graph summary (curl http://localhost:8765/v1/graph/summary) to see what's already known
+2. Research the topic thoroughly (use web search if needed)
+3. Identify key concepts, mechanisms, and relationships
+4. Connect findings to existing graph nodes where relevant
+5. Merge your findings into the graph via POST http://localhost:8765/v1/graph/merge as you go
+6. Also return findings as structured JSON for the graph:
 ${jsonInstructions}
 
 Focus on extracting ACTIONABLE concepts that build on the existing graph.`;
@@ -2305,11 +2402,13 @@ ${graphContext}
 USER REQUEST: ${userPrompt}
 
 INSTRUCTIONS:
-1. Read and analyze the specified files/codebase
-2. Identify architectural patterns, key mechanisms, and design decisions
-3. Map findings to existing graph concepts where possible
-4. DO NOT modify any files - this is READ-ONLY analysis
-5. Return findings as JSON:
+1. Read the graph summary first (curl http://localhost:8765/v1/graph/summary) to see what's already mapped
+2. Read and analyze the specified files/codebase
+3. Identify architectural patterns, key mechanisms, and design decisions
+4. Map findings to existing graph concepts where possible
+5. DO NOT modify any source files - this is READ-ONLY analysis
+6. Merge discovered concepts into the graph via POST http://localhost:8765/v1/graph/merge
+7. Also return findings as JSON:
 ${jsonInstructions}
 
 Focus on extracting transferable patterns and concepts.`;
@@ -2317,17 +2416,21 @@ Focus on extracting transferable patterns and concepts.`;
         case 'ground':
             return `You are analyzing a codebase to ground knowledge graph concepts in actual implementations.
 
+${graphContext}
+
 TARGET CODEBASE: ${userPrompt.split(' ')[0]}
 
 CONCEPTS TO GROUND:
-${userPrompt.includes('CONCEPTS:') ? userPrompt.split('CONCEPTS:')[1] : graphContext}
+${userPrompt.includes('CONCEPTS:') ? userPrompt.split('CONCEPTS:')[1] : 'Read concepts from the graph API: curl -s http://localhost:8765/v1/graph'}
 
 INSTRUCTIONS:
-1. For each concept, search the codebase for actual implementations
-2. Find specific files, functions, classes that implement the concept
-3. Determine if the concept is: IMPLEMENTED, PARTIAL, or NOT_FOUND
-4. Extract code references (file:line) for implemented concepts
-5. Note any gaps between the concept and implementation
+1. Read the full graph (curl http://localhost:8765/v1/graph) to get all concepts and their descriptions
+2. For each concept, search the codebase for actual implementations
+3. Find specific files, functions, classes that implement the concept
+4. Determine if the concept is: IMPLEMENTED, PARTIAL, or NOT_FOUND
+5. Extract code references (file:line) for implemented concepts
+6. Note any gaps between the concept and implementation
+7. Update grounded concepts in the graph via POST http://localhost:8765/v1/graph/merge with evidence data
 
 Return a JSON response with grounding analysis:
 {
@@ -2360,13 +2463,14 @@ ${graphContext}
 USER REQUEST: ${userPrompt}
 
 INSTRUCTIONS:
-Based on the request, you may:
-- Research topics and add to the graph
-- Read/analyze codebases
-- Implement features or modifications
-- Search the web for information
-
-Choose the appropriate approach and execute it.
+1. Start by reading the graph summary (curl http://localhost:8765/v1/graph/summary) to understand the current knowledge base
+2. Based on the request, you may:
+   - Research topics and add findings to the graph
+   - Read/analyze codebases and map discoveries to the graph
+   - Implement features or modifications
+   - Search the web for information
+3. As you work, merge new knowledge into the graph via POST http://localhost:8765/v1/graph/merge
+4. The graph is the user's persistent memory — keep it updated with what you learn
 
 After completing the task, return a JSON summary:
 ${jsonInstructions}`;
@@ -2392,14 +2496,51 @@ async function routeToClaudeCode(prompt, mode = 'auto') {
     addChatMessage('user', `/${modeLabels[mode]} ${prompt}`);
     showChatModal(true);
 
-    // Build graph context
-    const graphContext = merged_object?.nodes?.length > 0
-        ? `\nKNOWLEDGE GRAPH (${merged_object.nodes.length} nodes):\n` +
-          merged_object.nodes.slice(0, 50).map(n =>
-            `- ${n.name || n.properties?.name}: ${(n.description || n.properties?.description || '').slice(0, 100)}`
-          ).join('\n') +
-          (merged_object.nodes.length > 50 ? `\n... and ${merged_object.nodes.length - 50} more nodes` : '')
-        : '\nNo existing graph.';
+    // Build graph context — give Claude Code API access instead of a truncated dump
+    const nodeCount = merged_object?.nodes?.length || 0;
+    const relCount = merged_object?.relationships?.length || 0;
+    const gid = currentGraphId || 'default';
+    const graphContext = `
+KNOWLEDGE GRAPH API (${nodeCount} nodes, ${relCount} relationships):
+You have access to a live knowledge graph via a local API at http://localhost:8765.
+Use curl or fetch to interact with it. The graph is your shared memory with the user.
+
+IMPORTANT: This task is working with graph ID: "${gid}"
+You MUST include ?id=${gid} on ALL graph API calls to target the correct graph.
+
+READING THE GRAPH:
+  curl -s "http://localhost:8765/v1/graph?id=${gid}"
+    → Returns full graph JSON: {"nodes": [...], "relationships": [...]}
+    Each node: {"id": int, "labels": ["Type"], "properties": {"name": "...", "description": "..."}, ...}
+    Each relationship: {"startNodeId": int, "endNodeId": int, "type": "RELATION_TYPE", "properties": {}}
+
+  curl -s "http://localhost:8765/v1/graph/summary?id=${gid}"
+    → Returns lightweight summary: node names, types, and counts (use this first to orient yourself)
+
+WRITING TO THE GRAPH (add new knowledge):
+  curl -s -X POST "http://localhost:8765/v1/graph/merge?id=${gid}" \\
+    -H "Content-Type: application/json" \\
+    -d '{"nodes": [...], "relationships": [...]}'
+    → Merges new nodes/relationships into the existing graph (deduplicates by name)
+    Node format: {"id": int, "name": "Name", "type": "Type", "labels": ["Type"], "properties": {"name": "Name", "description": "..."}}
+    Relationship format: {"startNodeId": int, "endNodeId": int, "type": "RELATES_TO", "properties": {}}
+
+REPLACING THE FULL GRAPH:
+  curl -s -X POST "http://localhost:8765/v1/graph?id=${gid}" \\
+    -H "Content-Type: application/json" \\
+    -d '{"nodes": [...], "relationships": [...]}'
+    → Overwrites the entire graph (use with caution)
+
+LISTING ALL GRAPHS:
+  curl -s http://localhost:8765/v1/graphs
+    → Returns: {"graphs": [{"id": "...", "node_count": N, "relationship_count": N}, ...]}
+
+WORKFLOW:
+1. Start by reading the graph summary to understand what's already known
+2. Read the full graph if you need detailed node descriptions or relationship structure
+3. As you discover new concepts, entities, or relationships during your work, merge them into the graph
+4. The graph is the user's persistent knowledge base — treat it as a living document, not throwaway output
+`;
 
     // Mode-specific prompts
     const fullPrompt = buildModePrompt(mode, prompt, graphContext);
@@ -2550,6 +2691,16 @@ async function routeToClaudeCode(prompt, mode = 'auto') {
                     } catch (e) {
                         console.error('Error parsing Claude response:', e);
                         addChatMessage('assistant', task.result?.response?.slice(0, 2000) || 'Task completed.');
+                    }
+
+                    // Auto-pull from server — task may have written to the graph via the API
+                    try {
+                        const pullResult = await pullFromServer();
+                        if (pullResult?.added > 0) {
+                            addChatMessage('system', `Pulled ${pullResult.added} new nodes from server (total: ${pullResult.total}).`);
+                        }
+                    } catch (e) {
+                        console.warn('Auto-pull after task failed:', e);
                     }
 
                     // Mark task as completed

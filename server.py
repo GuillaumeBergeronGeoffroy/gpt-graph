@@ -10,8 +10,9 @@ import shutil
 import os
 import time
 import uuid
+import tempfile
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 import subprocess
 import threading
 import pty
@@ -20,29 +21,47 @@ import select
 # Track active tasks
 active_tasks = {}  # task_id -> task info
 
-# Graph state file (shared between browser and Claude Code)
-GRAPH_STATE_FILE = os.path.expanduser("~/.gpt-graph/graph-state.json")
-os.makedirs(os.path.dirname(GRAPH_STATE_FILE), exist_ok=True)
+# Graph storage directory (one file per graph)
+GRAPHS_DIR = os.path.expanduser("~/.gpt-graph/graphs")
+os.makedirs(GRAPHS_DIR, exist_ok=True)
+
+# Migrate legacy single-file format on startup
+_legacy_file = os.path.expanduser("~/.gpt-graph/graph-state.json")
+if os.path.exists(_legacy_file):
+    _dest = os.path.join(GRAPHS_DIR, "default.json")
+    if not os.path.exists(_dest):
+        shutil.move(_legacy_file, _dest)
+        print(f"Migrated legacy graph to {_dest}")
+    else:
+        print(f"Legacy file exists but default.json already present; skipping migration")
 
 
-def load_graph_state():
-    """Load current graph state from file."""
-    if os.path.exists(GRAPH_STATE_FILE):
-        with open(GRAPH_STATE_FILE, 'r') as f:
+def _graph_file(graph_id):
+    """Get the file path for a graph ID. Sanitizes the ID to prevent path traversal."""
+    safe_id = graph_id.replace('/', '_').replace('\\', '_').replace('..', '_')
+    return os.path.join(GRAPHS_DIR, f"{safe_id}.json")
+
+
+def load_graph_state(graph_id='default'):
+    """Load graph state from file."""
+    path = _graph_file(graph_id)
+    if os.path.exists(path):
+        with open(path, 'r') as f:
             return json.load(f)
     return {"nodes": [], "relationships": []}
 
 
-def save_graph_state(state):
+def save_graph_state(state, graph_id='default'):
     """Save graph state to file."""
-    with open(GRAPH_STATE_FILE, 'w') as f:
+    path = _graph_file(graph_id)
+    with open(path, 'w') as f:
         json.dump(state, f, indent=2)
     return state
 
 
-def merge_into_graph(new_data):
+def merge_into_graph(new_data, graph_id='default'):
     """Merge new nodes/relationships into existing graph."""
-    current = load_graph_state()
+    current = load_graph_state(graph_id)
 
     # Get existing node names for dedup
     existing_names = {n.get('name', n.get('properties', {}).get('name', '')) for n in current.get('nodes', [])}
@@ -62,8 +81,30 @@ def merge_into_graph(new_data):
     new_rels = new_data.get('relationships', [])
     current['relationships'] = current.get('relationships', []) + new_rels
 
-    save_graph_state(current)
+    save_graph_state(current, graph_id)
     return current
+
+
+def list_graphs():
+    """List all available graphs."""
+    graphs = []
+    for f in os.listdir(GRAPHS_DIR):
+        if f.endswith('.json'):
+            graph_id = f[:-5]  # strip .json
+            path = os.path.join(GRAPHS_DIR, f)
+            try:
+                with open(path, 'r') as fh:
+                    data = json.load(fh)
+                graphs.append({
+                    'id': graph_id,
+                    'node_count': len(data.get('nodes', [])),
+                    'relationship_count': len(data.get('relationships', [])),
+                    'modified_at': os.path.getmtime(path)
+                })
+            except Exception:
+                graphs.append({'id': graph_id, 'node_count': 0, 'relationship_count': 0})
+    graphs.sort(key=lambda g: g.get('modified_at', 0), reverse=True)
+    return graphs
 
 
 def find_claude_binary() -> str:
@@ -155,9 +196,24 @@ def execute_claude_task(prompt: str, working_dir: str = None, model: str = "clau
         active_tasks[task_id]['log_file'] = log_file
         active_tasks[task_id]['started_at'] = time.time()
 
+    # Write prompt to a temp file so Claude Code can read it via its Read tool.
+    # We pass the file path as the prompt, telling Claude to read instructions from it.
+    prompt_dir = os.path.expanduser("~/claude-projects/.logs")
+    os.makedirs(prompt_dir, exist_ok=True)
+    prompt_file_path = os.path.join(prompt_dir, f"{task_id or 'task'}-prompt.txt")
+    with open(prompt_file_path, 'w') as pf:
+        pf.write(prompt)
+
+    # Pass a short bootstrap prompt that tells Claude to read the full instructions from the file.
+    # This avoids OS ARG_MAX limits and shell escaping issues with long/complex prompts.
+    bootstrap_prompt = (
+        f"Your full task instructions are in the file: {prompt_file_path}\n"
+        f"Read that file now and follow the instructions exactly."
+    )
+
     cmd = [
         CLAUDE_BINARY,
-        "-p", prompt,
+        "-p", bootstrap_prompt,
         "--model", model,
         "--output-format", "stream-json",
         "--verbose",
@@ -165,23 +221,27 @@ def execute_claude_task(prompt: str, working_dir: str = None, model: str = "clau
     ]
 
     # Run with stream-json for real-time output
-    with open(log_file, 'w') as log:
+    # stderr is sent to a file to prevent pipe deadlock
+    stderr_file = log_file + '.stderr'
+    with open(log_file, 'w') as log, open(stderr_file, 'w') as stderr_log:
         log.write(f"=== Task started at {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
         log.write(f"Working directory: {cwd}\n")
+        log.write(f"Prompt file: {prompt_file_path}\n")
         log.write(f"{'='*60}\n\n")
         log.flush()
 
         process = subprocess.Popen(
             cmd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=stderr_log,
             cwd=cwd,
+            text=True,
             bufsize=1
         )
 
         output_texts = []
         exit_code = None
-        buffer = ""
 
         try:
             # Read stdout line by line (stream-json outputs newline-delimited JSON)
@@ -190,7 +250,7 @@ def execute_claude_task(prompt: str, working_dir: str = None, model: str = "clau
                 if not line:
                     break
 
-                line_str = line.decode('utf-8', errors='replace').strip()
+                line_str = line.strip()
                 if not line_str:
                     continue
 
@@ -252,8 +312,23 @@ def execute_claude_task(prompt: str, working_dir: str = None, model: str = "clau
             log.write("\n\n=== TASK TIMED OUT ===\n")
             raise
 
+        # Append any stderr output to main log
+        try:
+            with open(stderr_file, 'r') as sf:
+                stderr_content = sf.read().strip()
+                if stderr_content:
+                    log.write(f"\n\n[STDERR]\n{stderr_content}\n")
+        except Exception:
+            pass
+
         log.write(f"\n{'='*60}\n")
         log.write(f"=== Task completed with exit code {exit_code} ===\n")
+
+    # Clean up prompt temp file
+    try:
+        os.unlink(prompt_file_path)
+    except Exception:
+        pass
 
     response = ''.join(output_texts).strip()
 
@@ -313,13 +388,31 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
 
+    def _parse_path(self):
+        """Parse path and query params. Returns (path, params_dict)."""
+        parsed = urlparse(self.path)
+        params = {}
+        if parsed.query:
+            for part in parsed.query.split('&'):
+                if '=' in part:
+                    k, v = part.split('=', 1)
+                    params[k] = v
+        return parsed.path, params
+
+    def _graph_id(self, params):
+        """Extract graph_id from query params, default to 'default'."""
+        return params.get('id', 'default')
+
     def do_OPTIONS(self):
         self.send_response(200)
         self._set_cors_headers()
         self.end_headers()
 
     def do_POST(self):
-        if self.path == '/v1/completions' or self.path == '/v1/chat/completions':
+        path, params = self._parse_path()
+        graph_id = self._graph_id(params)
+
+        if path == '/v1/completions' or path == '/v1/chat/completions':
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length)
 
@@ -366,7 +459,7 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": {"message": str(e)}}).encode())
 
-        elif self.path == '/v1/execute':
+        elif path == '/v1/execute':
             # Agentic task execution endpoint (async)
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length)
@@ -377,6 +470,7 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                 working_dir = request.get('working_dir', None)
                 model = request.get('model', 'claude-opus-4-5-20251101')
                 async_mode = request.get('async', True)  # Default to async
+                task_graph_id = request.get('graph_id', graph_id)
 
                 task_id = str(uuid.uuid4())[:8]
 
@@ -386,12 +480,13 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                     'status': 'starting',
                     'prompt': prompt[:200] + '...' if len(prompt) > 200 else prompt,
                     'working_dir': os.path.expanduser(working_dir) if working_dir else os.path.expanduser("~/claude-projects"),
+                    'graph_id': task_graph_id,
                     'created_at': time.time(),
                     'last_output': '',
                     'output_lines': 0
                 }
 
-                print(f"Starting task {task_id} with prompt length: {len(prompt)}")
+                print(f"Starting task {task_id} (graph: {task_graph_id}) with prompt length: {len(prompt)}")
 
                 if async_mode:
                     # Start async and return immediately
@@ -431,14 +526,14 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": {"message": str(e)}}).encode())
 
-        elif self.path == '/v1/graph':
+        elif path == '/v1/graph':
             # Save full graph state (browser syncs to server)
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length)
 
             try:
                 graph = json.loads(post_data.decode('utf-8'))
-                save_graph_state(graph)
+                save_graph_state(graph, graph_id)
 
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
@@ -458,14 +553,14 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": {"message": str(e)}}).encode())
 
-        elif self.path == '/v1/graph/merge':
+        elif path == '/v1/graph/merge':
             # Merge new nodes/relationships into graph (Claude Code adds to graph)
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length)
 
             try:
                 new_data = json.loads(post_data.decode('utf-8'))
-                updated_graph = merge_into_graph(new_data)
+                updated_graph = merge_into_graph(new_data, graph_id)
 
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
@@ -491,29 +586,40 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_GET(self):
-        if self.path == '/health':
+        path, params = self._parse_path()
+        graph_id = self._graph_id(params)
+
+        if path == '/health':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self._set_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps({"status": "ok", "claude_binary": CLAUDE_BINARY}).encode())
 
-        elif self.path == '/v1/graph':
-            # Return current graph state (for Claude Code to read)
+        elif path == '/v1/graphs':
+            # List all available graphs
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self._set_cors_headers()
             self.end_headers()
-            graph = load_graph_state()
+            self.wfile.write(json.dumps({"graphs": list_graphs()}).encode())
+
+        elif path == '/v1/graph':
+            # Return graph state for a specific graph (for Claude Code to read)
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self._set_cors_headers()
+            self.end_headers()
+            graph = load_graph_state(graph_id)
             self.wfile.write(json.dumps(graph).encode())
 
-        elif self.path == '/v1/graph/summary':
+        elif path == '/v1/graph/summary':
             # Return condensed graph summary (node names + types only)
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self._set_cors_headers()
             self.end_headers()
-            graph = load_graph_state()
+            graph = load_graph_state(graph_id)
             summary = {
                 "node_count": len(graph.get('nodes', [])),
                 "relationship_count": len(graph.get('relationships', [])),
@@ -527,7 +633,7 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
             }
             self.wfile.write(json.dumps(summary).encode())
 
-        elif self.path == '/v1/tasks':
+        elif path == '/v1/tasks':
             # List all active tasks
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -543,13 +649,13 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
             } for t in active_tasks.values()]
             self.wfile.write(json.dumps({"tasks": tasks_summary}).encode())
 
-        elif self.path.startswith('/v1/tasks/'):
+        elif path.startswith('/v1/tasks/'):
             # Get specific task status
-            task_id = self.path.split('/')[-1]
+            task_id = path.split('/')[-1]
 
             # Check for log request
-            if '/log' in self.path:
-                task_id = self.path.split('/')[3]
+            if '/log' in path:
+                task_id = path.split('/')[3]
                 task = active_tasks.get(task_id)
                 if task and task.get('log_file') and os.path.exists(task['log_file']):
                     self.send_response(200)
@@ -609,16 +715,17 @@ def run_server(port=8765):
     server = HTTPServer(('localhost', port), CORSRequestHandler)
     print(f"Claude Code API server running on http://localhost:{port}")
     print("Using local Claude account (no API key needed)")
-    print("\nEndpoints:")
+    print("\nEndpoints (all graph endpoints accept ?id=<graph_id>):")
     print(f"  POST http://localhost:{port}/v1/completions      - Text completions")
     print(f"  POST http://localhost:{port}/v1/chat/completions - Chat completions")
     print(f"  POST http://localhost:{port}/v1/execute          - Agentic task execution")
-    print(f"  GET  http://localhost:{port}/v1/graph            - Get graph state")
+    print(f"  GET  http://localhost:{port}/v1/graphs           - List all graphs")
+    print(f"  GET  http://localhost:{port}/v1/graph?id=ID      - Get graph state")
     print(f"  GET  http://localhost:{port}/v1/graph/summary    - Get graph summary")
-    print(f"  POST http://localhost:{port}/v1/graph            - Save graph state")
+    print(f"  POST http://localhost:{port}/v1/graph?id=ID      - Save graph state")
     print(f"  POST http://localhost:{port}/v1/graph/merge      - Merge new nodes")
     print(f"  GET  http://localhost:{port}/health")
-    print(f"\nGraph state: {GRAPH_STATE_FILE}")
+    print(f"\nGraph storage: {GRAPHS_DIR}")
     print(f"Project directory: ~/claude-projects/")
     print("\nPress Ctrl+C to stop")
     server.serve_forever()

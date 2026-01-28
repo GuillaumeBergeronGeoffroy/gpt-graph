@@ -369,7 +369,8 @@ async function syncToServer() {
     }
 
     try {
-        const response = await fetch(`${SERVER_URL}/v1/graph`, {
+        const gid = currentGraphId || 'default';
+        const response = await fetch(`${SERVER_URL}/v1/graph?id=${encodeURIComponent(gid)}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -395,7 +396,8 @@ async function pullFromServer() {
      * Merges server state into current graph.
      */
     try {
-        const response = await fetch(`${SERVER_URL}/v1/graph`);
+        const gid = currentGraphId || 'default';
+        const response = await fetch(`${SERVER_URL}/v1/graph?id=${encodeURIComponent(gid)}`);
         if (!response.ok) throw new Error(`Server error: ${response.status}`);
 
         const serverGraph = await response.json();
@@ -454,7 +456,8 @@ async function executeClaudeTask(prompt, options = {}) {
             body: JSON.stringify({
                 prompt: prompt,
                 working_dir: workingDir,
-                async: asyncMode
+                async: asyncMode,
+                graph_id: currentGraphId || 'default'
             })
         });
 
