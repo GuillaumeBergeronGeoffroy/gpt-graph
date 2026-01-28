@@ -663,13 +663,13 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                     self._set_cors_headers()
                     self.end_headers()
                     with open(task['log_file'], 'r') as f:
-                        # Read last 100 lines for live view
-                        lines = f.readlines()
-                        self.wfile.write(''.join(lines[-100:]).encode())
+                        self.wfile.write(f.read().encode())
                 else:
                     self.send_response(404)
+                    self.send_header('Content-Type', 'application/json')
                     self._set_cors_headers()
                     self.end_headers()
+                    self.wfile.write(json.dumps({"error": "Log not found"}).encode())
                 return
 
             task = active_tasks.get(task_id)
