@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Brain Monitor</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <link rel="stylesheet" href="css/brain.css">
+</head>
+<body>
+  <div id="layout">
+    <header>
+      <div class="header-left">
+        <h1>Brain Monitor</h1>
+        <span id="status-badge" class="badge stopped">Stopped</span>
+        <span id="iteration-badge" class="badge iter">#0</span>
+      </div>
+      <div class="header-right">
+        <span id="connection-dot" class="dot disconnected"></span>
+        <span id="connection-label">Connecting...</span>
+      </div>
+    </header>
+
+    <div id="panels">
+      <!-- Left: Controls + Graphs + Tasks -->
+      <div id="left-panel">
+        <section id="controls-section">
+          <h2>Agent Controls</h2>
+          <textarea id="prompt-input" placeholder="Enter agent goals..."></textarea>
+          <div class="control-row">
+            <label>Delay (s): <input type="number" id="interval-input" value="0" min="0" step="1"></label>
+            <div class="btn-group">
+              <button id="start-btn" onclick="startLoop()">Start</button>
+              <button id="stop-btn" onclick="stopLoop()" disabled>Stop</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="graphs-section">
+          <h2>Graphs <button class="refresh-btn" onclick="loadGraphs()">Refresh</button></h2>
+          <div id="graphs-list"></div>
+        </section>
+
+        <section id="tasks-section">
+          <h2>Tasks <button class="refresh-btn" onclick="loadTasks()">Refresh</button></h2>
+          <div id="tasks-list"></div>
+        </section>
+      </div>
+
+      <!-- Middle: Graph Viewer (D3) -->
+      <div id="mid-panel">
+        <div id="graph-header">
+          <h2>Graph: <span id="viewer-graph-name">select a graph</span></h2>
+          <div id="graph-meta"></div>
+          <div id="graph-stats"></div>
+        </div>
+        <div id="graph-viewer"></div>
+      </div>
+
+      <!-- Right: Activity Feed + Log Viewer -->
+      <div id="right-panel">
+        <section id="feed-section">
+          <h2>Activity Feed</h2>
+          <div id="feed"></div>
+        </section>
+
+        <section id="log-viewer-section">
+          <h2>Log: <span id="viewer-log-name">—</span></h2>
+          <div id="log-viewer"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+<script>
+const API = 'http://localhost:8765';
+const AGENT_API = API + '/v1/agent';  // Agent's own workspace
+let sse = null;
+let currentGraphSim = null; // Track active D3 simulation
+let currentGraphData = null; // Track loaded graph for popup connections
+
+// ── SSE ────────────────────────────────────────────────────────────────
+function connectSSE() {
+  if (sse) sse.close();
+  sse = new EventSource(`${API}/v1/loop/stream`);
+
+  sse.addEventListener('status', e => updateStatus(JSON.parse(e.data)));
+  sse.addEventListener('action', e => appendAction(JSON.parse(e.data)));
+  sse.addEventListener('iteration_complete', e => {
+    const d = JSON.parse(e.data);
+    appendAction({
+      type: 'iteration_complete',
+      detail: `Iteration ${d.iteration} done (exit ${d.exit_code}, ${d.response_length} chars)`,
+      timestamp: Date.now() / 1000, iteration: d.iteration
+    });
+    loadGraphs();
+    loadTasks();
+  });
+  sse.addEventListener('error', e => {
+    if (e.data) {
+      const d = JSON.parse(e.data);
+      appendAction({ type: 'error', detail: d.error, timestamp: Date.now() / 1000, iteration: d.iteration || 0 });
+    }
+  });
+
+  sse.onopen = () => {
+    document.getElementById('connection-dot').className = 'dot connected';
+    document.getElementById('connection-label').textContent = 'Connected';
+  };
+  sse.onerror = () => {
+    document.getElementById('connection-dot').className = 'dot disconnected';
+    document.getElementById('connection-label').textContent = 'Reconnecting...';
+  };
+}
+
+// ── Status ─────────────────────────────────────────────────────────────
+function updateStatus(data) {
+  const badge = document.getElementById('status-badge');
+  const iter = document.getElementById('iteration-badge');
+  const startBtn = document.getElementById('start-btn');
+  const stopBtn = document.getElementById('stop-btn');
+
+  if (data.running) {
+    badge.textContent = data.phase === 'waiting' ? `Waiting (${data.next_in}s)` : 'Running';
+    badge.className = 'badge running';
+  } else {
+    badge.textContent = 'Stopped';
+    badge.className = 'badge stopped';
+  }
+  iter.textContent = `#${data.iteration || 0}`;
+  startBtn.disabled = data.running;
+  stopBtn.disabled = !data.running;
+
+  if (data.prompt) {
+    const input = document.getElementById('prompt-input');
+    if (!input.value) input.value = data.prompt;
+  }
+}
+
+// ── Activity Feed ──────────────────────────────────────────────────────
+function appendAction(action) {
+  const feed = document.getElementById('feed');
+  const div = document.createElement('div');
+  div.className = `action action-${action.type}`;
+  const ts = new Date(action.timestamp * 1000).toLocaleTimeString();
+  const label = action.type.replace(/_/g, ' ');
+  const detail = typeof action.detail === 'string' ? action.detail : JSON.stringify(action.detail);
+  div.innerHTML = `
+    <span class="a-time">${ts}</span>
+    <span class="a-iter">#${action.iteration}</span>
+    <span class="a-type">${label}</span>
+    <span class="a-detail">${escHtml(detail)}</span>
+  `;
+  feed.appendChild(div);
+  feed.scrollTop = feed.scrollHeight;
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ── Graphs ─────────────────────────────────────────────────────────────
+async function loadGraphs() {
+  try {
+    const res = await fetch(`${AGENT_API}/graphs`);
+    const data = await res.json();
+    const list = document.getElementById('graphs-list');
+    list.innerHTML = '';
+    (data.graphs || []).forEach(g => {
+      const div = document.createElement('div');
+      div.className = 'graph-item';
+      div.onclick = () => viewGraph(g.id);
+      const mod = new Date(g.modified_at * 1000).toLocaleString();
+      div.innerHTML = `
+        <span class="g-name">${escHtml(g.title || g.id)}</span>
+        <span class="g-meta">${g.node_count}n / ${g.relationship_count}r</span>
+        <span class="g-time">${mod}</span>
+      `;
+      if (g.description) div.title = g.description;
+      list.appendChild(div);
+    });
+  } catch (e) {
+    console.error('Failed to load graphs:', e);
+  }
+}
+
+// ── D3 Graph Visualization ─────────────────────────────────────────────
+const labelColors = {
+  'Person': '#e91e63', 'Organization': '#2196f3', 'Place': '#4caf50',
+  'Event': '#ff9800', 'Process': '#9c27b0', 'Technology': '#00bcd4',
+  'Concept': '#ab47bc', 'Object': '#8d6e63', 'Action': '#ef5350',
+  'Synthesis': '#ffd700'
+};
+
+function getNodeColor(d) {
+  return labelColors[d.labels?.[0]] || '#9c27b0';
+}
+
+function getGroundingStroke(d) {
+  let grounding = d.grounding;
+  if (!grounding && d.properties?.grounding) {
+    const str = d.properties.grounding;
+    if (typeof str === 'string' && str.trim().startsWith('{')) {
+      try { grounding = JSON.parse(str); } catch (e) {}
+    }
+  }
+  if (grounding) {
+    if (grounding.status === 'IMPLEMENTED') return "#4ade80";
+    if (grounding.status === 'PARTIAL') return "#fbbf24";
+    if (grounding.status === 'NOT_FOUND') return "#f87171";
+  }
+  const v = d.properties?._groundingVerdict;
+  if (v === 'grounded') return "#4ade80";
+  if (v === 'weak') return "#fbbf24";
+  if (v === 'ungrounded') return "#f87171";
+  return "#fff";
+}
+
+async function viewGraph(id) {
+  console.log('viewGraph called:', id);
+  document.getElementById('viewer-graph-name').textContent = id;
+  try {
+    const res = await fetch(`${AGENT_API}/graph?id=${encodeURIComponent(id)}`);
+    const graph = await res.json();
+    const nodes = graph.nodes || [];
+    const rels = graph.relationships || [];
+    console.log(`Loaded ${nodes.length} nodes, ${rels.length} rels`);
+
+    // Show metadata
+    const meta = document.getElementById('graph-meta');
+    if (graph.title || graph.description) {
+      meta.innerHTML = `${graph.title ? `<strong>${escHtml(graph.title)}</strong>` : ''}${graph.description ? `<span>${escHtml(graph.description)}</span>` : ''}`;
+    } else {
+      meta.innerHTML = '';
+    }
+
+    document.getElementById('graph-stats').textContent = `${nodes.length} nodes, ${rels.length} relationships`;
+
+    // Kill previous simulation
+    if (currentGraphSim) { currentGraphSim.stop(); currentGraphSim = null; }
+
+    const viewer = document.getElementById('graph-viewer');
+    viewer.innerHTML = '';
+
+    if (nodes.length === 0) {
+      viewer.innerHTML = '<div style="padding:40px;text-align:center;color:rgba(255,255,255,0.3)">Empty graph</div>';
+      return;
+    }
+
+    // Wait a frame for flex layout to compute actual dimensions
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+    // Deep clone to avoid mutating
+    const graphData = JSON.parse(JSON.stringify({ nodes, relationships: rels }));
+    currentGraphData = graphData;
+
+    // Build links
+    graphData.relationships.forEach(link => {
+      link.source = graphData.nodes.find(n => n.id === link.startNodeId);
+      link.target = graphData.nodes.find(n => n.id === link.endNodeId);
+    });
+    graphData.relationships = graphData.relationships.filter(r => r.source && r.target);
+
+    // Link counts
+    const linkCount = {};
+    graphData.nodes.forEach(n => linkCount[n.id] = 0);
+    graphData.relationships.forEach(r => {
+      const sid = r.source?.id ?? r.source;
+      const tid = r.target?.id ?? r.target;
+      if (sid !== undefined) linkCount[sid] = (linkCount[sid] || 0) + 1;
+      if (tid !== undefined) linkCount[tid] = (linkCount[tid] || 0) + 1;
+    });
+
+    const maxLinks = Math.max(1, ...Object.values(linkCount));
+    const getRadius = d => 8 + Math.pow((linkCount[d.id] || 0) / maxLinks, 0.6) * 30;
+    const getFontSize = d => 9 + Math.pow((linkCount[d.id] || 0) / maxLinks, 0.6) * 8;
+    const getLinkWidth = link => {
+      const avg = ((linkCount[link.source?.id ?? link.source] || 0) + (linkCount[link.target?.id ?? link.target] || 0)) / 2;
+      return 1 + (avg / maxLinks) * 3;
+    };
+    const getLinkOpacity = link => {
+      const avg = ((linkCount[link.source?.id ?? link.source] || 0) + (linkCount[link.target?.id ?? link.target] || 0)) / 2;
+      return 0.15 + (avg / maxLinks) * 0.45;
+    };
+
+    // Force layout reflow before measuring
+    const rect = viewer.getBoundingClientRect();
+    const width = rect.width || viewer.clientWidth || 800;
+    const height = rect.height || viewer.clientHeight || 600;
+
+    console.log('Graph viewer dimensions:', width, 'x', height);
+
+    const svg = d3.select(viewer).append('svg')
+      .attr('width', width).attr('height', height)
+      .style('width', '100%').style('height', '100%');
+
+    const g = svg.append('g');
+    const zoom = d3.zoom().scaleExtent([0.15, 4]).on('zoom', e => g.attr('transform', e.transform));
+    svg.call(zoom);
+
+    const nodeCount = graphData.nodes.length;
+    const linkDist = Math.max(80, Math.min(150, 250 / Math.sqrt(nodeCount)));
+    const charge = Math.max(-3000, Math.min(-600, -400 * Math.sqrt(nodeCount)));
+
+    const simulation = d3.forceSimulation()
+      .force('link', d3.forceLink().id(d => d.id).distance(linkDist))
+      .force('charge', d3.forceManyBody().strength(charge).distanceMax(1200))
+      .force('center', d3.forceCenter(width / 2, height / 2))
+      .force('collision', d3.forceCollide().radius(d => getRadius(d) + 30).strength(1))
+      .force('x', d3.forceX(width / 2).strength(0.01))
+      .force('y', d3.forceY(height / 2).strength(0.01))
+      .alphaDecay(0.015).velocityDecay(0.25);
+
+    currentGraphSim = simulation;
+
+    // Relationship labels
+    const linkGroup = g.append('g');
+    const link = linkGroup.selectAll('line')
+      .data(graphData.relationships).join('line')
+      .attr('stroke', d => `rgba(255,255,255,${getLinkOpacity(d)})`)
+      .attr('stroke-width', d => getLinkWidth(d));
+
+    const linkLabel = linkGroup.selectAll('text')
+      .data(graphData.relationships).join('text')
+      .attr('fill', 'rgba(255,255,255,0.25)')
+      .attr('font-size', '8px')
+      .attr('text-anchor', 'middle')
+      .attr('font-family', "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif")
+      .text(d => d.type || '');
+
+    const node = g.append('g').selectAll('circle')
+      .data(graphData.nodes).join('circle')
+      .attr('r', d => getRadius(d))
+      .attr('fill', d => getNodeColor(d))
+      .attr('stroke', d => getGroundingStroke(d))
+      .attr('stroke-width', d => {
+        const has = d.grounding || d.properties?._groundingVerdict;
+        return has ? 3 : 1.5;
+      })
+      .style('cursor', 'pointer')
+      .on('click', (event, d) => { event.stopPropagation(); showNodePopup(d, event); })
+      .call(d3.drag()
+        .on('start', (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+        .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
+        .on('end', (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; })
+      );
+
+    const text = g.append('g').selectAll('text')
+      .data(graphData.nodes).join('text')
+      .style('fill', 'white')
+      .attr('font-family', "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif")
+      .attr('font-size', d => getFontSize(d) + 'px')
+      .attr('font-weight', '500')
+      .attr('text-anchor', 'middle')
+      .attr('dy', d => getRadius(d) + 14)
+      .style('pointer-events', 'none')
+      .text(d => (d.properties?.name || d.name || '?').substring(0, 25));
+
+    simulation.nodes(graphData.nodes).on('tick', () => {
+      link.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+          .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+      linkLabel.attr('x', d => (d.source.x + d.target.x) / 2)
+               .attr('y', d => (d.source.y + d.target.y) / 2);
+      node.attr('cx', d => d.x).attr('cy', d => d.y);
+      text.attr('x', d => d.x).attr('y', d => d.y);
+    });
+    simulation.force('link').links(graphData.relationships);
+    simulation.alpha(1).restart();
+
+    // Fit view after simulation settles
+    setTimeout(() => {
+      const bounds = g.node().getBBox();
+      if (bounds.width > 0 && bounds.height > 0) {
+        const pad = 40;
+        const scale = Math.min(
+          width / (bounds.width + pad * 2),
+          height / (bounds.height + pad * 2),
+          1.5
+        );
+        const tx = width / 2 - (bounds.x + bounds.width / 2) * scale;
+        const ty = height / 2 - (bounds.y + bounds.height / 2) * scale;
+        svg.transition().duration(500).call(
+          zoom.transform,
+          d3.zoomIdentity.translate(tx, ty).scale(scale)
+        );
+      }
+    }, 2000);
+
+  } catch (e) {
+    console.error('viewGraph error:', e);
+    document.getElementById('graph-viewer').innerHTML = `<div style="padding:20px;color:#ef9a9a">Error: ${escHtml(e.message)}<br><pre style="font-size:10px;margin-top:8px;color:#999">${escHtml(e.stack || '')}</pre></div>`;
+  }
+}
+
+// Full node popup (read-only, matches index.html style)
+function showNodePopup(node, event) {
+  hideNodePopup();
+
+  // Find connections
+  const connections = [];
+  if (currentGraphData?.relationships) {
+    currentGraphData.relationships.forEach(r => {
+      const sourceId = r.source?.id ?? r.startNodeId;
+      const targetId = r.target?.id ?? r.endNodeId;
+      let connectedNode = null, direction = '';
+
+      if (sourceId === node.id) {
+        connectedNode = currentGraphData.nodes.find(n => n.id === targetId);
+        direction = '\u2192';
+      } else if (targetId === node.id) {
+        connectedNode = currentGraphData.nodes.find(n => n.id === sourceId);
+        direction = '\u2190';
+      }
+      if (connectedNode) {
+        const linkCount = currentGraphData.relationships.filter(rel => {
+          const s = rel.source?.id ?? rel.startNodeId;
+          const t = rel.target?.id ?? rel.endNodeId;
+          return s === connectedNode.id || t === connectedNode.id;
+        }).length;
+        connections.push({ node: connectedNode, type: r.type || 'CONNECTED', direction, strength: linkCount });
+      }
+    });
+  }
+  connections.sort((a, b) => b.strength - a.strength);
+  const maxStrength = Math.max(1, ...connections.map(c => c.strength));
+
+  let connectionsHtml = '';
+  if (connections.length > 0) {
+    connectionsHtml = `
+      <div class="popup-connections">
+        <div class="connections-header">Connections (${connections.length})</div>
+        <div class="connections-list">
+          ${connections.map(c => {
+            const pct = Math.round((c.strength / maxStrength) * 100);
+            const cName = c.node.properties?.name || c.node.name || '?';
+            return `
+              <div class="connection-item">
+                <div class="connection-info">
+                  <span class="connection-direction">${c.direction}</span>
+                  <span class="connection-name">${escHtml(cName)}</span>
+                </div>
+                <div class="connection-meta">
+                  <span class="connection-type">${c.type}</span>
+                  <div class="connection-strength"><div class="strength-bar" style="width:${pct}%"></div></div>
+                </div>
+              </div>`;
+          }).join('')}
+        </div>
+      </div>`;
+  }
+
+  // Audit section
+  let auditHtml = '';
+  const auditVerdict = node.properties?._groundingVerdict;
+  if (auditVerdict) {
+    const colors = { grounded: '#4ade80', weak: '#fbbf24', ungrounded: '#f87171' };
+    const icons = { grounded: '\u2713', weak: '\u26A0', ungrounded: '\u2717' };
+    let tests = node.properties?._groundingTests;
+    if (typeof tests === 'string') { try { tests = JSON.parse(tests); } catch(e) { tests = {}; } }
+    const testsHtml = tests ? Object.entries(tests).map(([key, val]) => `
+      <div class="audit-test ${val?.pass ? 'pass' : 'fail'}">
+        <span class="test-icon">${val?.pass ? '\u2713' : '\u2717'}</span>
+        <span class="test-name">${key}</span>
+      </div>`).join('') : '';
+    const auditDate = node.properties?._auditedAt ? new Date(node.properties._auditedAt).toLocaleDateString() : '';
+    auditHtml = `
+      <div class="popup-audit">
+        <div class="audit-header-section">
+          <span class="audit-verdict" style="color:${colors[auditVerdict]||'#888'}">${icons[auditVerdict]||'?'} ${auditVerdict.toUpperCase()}</span>
+          <span class="audit-score">Score: ${node.properties?._groundingScore||0}/3</span>
+          ${auditDate ? `<span class="audit-date">${auditDate}</span>` : ''}
+        </div>
+        ${testsHtml ? `<div class="audit-tests">${testsHtml}</div>` : ''}
+        ${node.properties?._groundingSuggestion ? `<div class="audit-suggestion"><strong>Suggestion:</strong> ${node.properties._groundingSuggestion}</div>` : ''}
+        ${node.properties?._groundingRecommendation ? `<div class="audit-recommendation ${node.properties._groundingRecommendation}">${node.properties._groundingRecommendation.toUpperCase()}</div>` : ''}
+      </div>`;
+  }
+
+  // Codebase grounding section
+  let groundingHtml = '';
+  let grounding = node.grounding;
+  if (!grounding && node.properties?.grounding) {
+    const str = node.properties.grounding;
+    if (typeof str === 'string' && str.trim().startsWith('{')) { try { grounding = JSON.parse(str); } catch(e) {} }
+  }
+  if (grounding) {
+    const sColors = { IMPLEMENTED: '#4ade80', PARTIAL: '#fbbf24', NOT_FOUND: '#f87171' };
+    const sIcons = { IMPLEMENTED: '\u2713', PARTIAL: '\u25D0', NOT_FOUND: '\u2717' };
+    groundingHtml = `
+      <div class="popup-grounding">
+        <div class="grounding-header">
+          <span class="grounding-status" style="color:${sColors[grounding.status]||'#888'}">${sIcons[grounding.status]||'?'} ${grounding.status||'Unknown'}</span>
+        </div>
+        <div class="grounding-analysis">${grounding.analysis || ''}</div>
+      </div>`;
+  }
+
+  const isSynthesis = node.labels?.[0] === 'Synthesis';
+  const popup = document.createElement('div');
+  popup.id = 'node-popup';
+  popup.innerHTML = `
+    <div class="popup-header ${isSynthesis ? 'synthesis-node' : ''} ${auditVerdict ? 'audited-' + auditVerdict : ''}">
+      <span class="popup-label">${node.labels?.[0] || 'Node'}${isSynthesis ? ' \u2728' : ''}</span>
+      <span class="popup-close" onclick="hideNodePopup()">\u00D7</span>
+    </div>
+    <div class="popup-name">${escHtml(node.properties?.name || 'Unnamed')}</div>
+    <div class="popup-description">${escHtml(node.properties?.description || 'No description')}</div>
+    ${auditHtml}
+    ${groundingHtml}
+    ${connectionsHtml}
+  `;
+
+  document.body.appendChild(popup);
+
+  // Position near click, within viewport
+  setTimeout(() => {
+    const rect = popup.getBoundingClientRect();
+    let left = event.clientX + 15, top = event.clientY + 15;
+    if (left + rect.width > window.innerWidth - 20) left = event.clientX - rect.width - 15;
+    if (top + rect.height > window.innerHeight - 20) top = event.clientY - rect.height - 15;
+    popup.style.left = Math.max(10, left) + 'px';
+    popup.style.top = Math.max(10, top) + 'px';
+  }, 0);
+}
+
+function hideNodePopup() {
+  const el = document.getElementById('node-popup');
+  if (el) el.remove();
+}
+
+// ── Tasks ──────────────────────────────────────────────────────────────
+let selectedTaskId = null;
+let logPollInterval = null;
+const LOG_POLL_MS = 3000;
+
+async function loadTasks() {
+  try {
+    const res = await fetch(`${API}/v1/tasks`);
+    const data = await res.json();
+    const list = document.getElementById('tasks-list');
+    list.innerHTML = '';
+
+    const tasks = (data.tasks || []).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+    tasks.forEach(t => {
+      const div = document.createElement('div');
+      div.className = `task-item task-${t.status}`;
+      if (t.id === selectedTaskId) div.classList.add('active');
+      div.onclick = () => viewLog(t.id);
+      const created = t.created_at ? new Date(t.created_at * 1000).toLocaleTimeString() : '';
+      div.innerHTML = `
+        <span class="t-id">${escHtml(t.id)}</span>
+        <span class="t-status">${t.status}</span>
+        <span class="t-lines">${t.output_lines || 0} lines</span>
+        <span class="t-time">${created}</span>
+      `;
+      list.appendChild(div);
+    });
+
+    // If selected task finished, stop polling its log (do one final fetch)
+    if (selectedTaskId && logPollInterval) {
+      const selected = tasks.find(t => t.id === selectedTaskId);
+      if (selected && selected.status !== 'running' && selected.status !== 'starting') {
+        clearInterval(logPollInterval);
+        logPollInterval = null;
+        fetchLog(selectedTaskId); // one last fetch to get final output
+      }
+    }
+  } catch (e) {
+    console.error('Failed to load tasks:', e);
+  }
+}
+
+async function fetchLog(taskId) {
+  try {
+    const res = await fetch(`${API}/v1/tasks/${encodeURIComponent(taskId)}/log`);
+    const text = await res.text();
+    const viewer = document.getElementById('log-viewer');
+    const wasAtBottom = viewer.scrollTop + viewer.clientHeight >= viewer.scrollHeight - 30;
+    viewer.textContent = text;
+    if (wasAtBottom) viewer.scrollTop = viewer.scrollHeight;
+  } catch (e) {
+    document.getElementById('log-viewer').textContent = 'Failed to load log';
+  }
+}
+
+async function viewLog(taskId) {
+  selectedTaskId = taskId;
+  document.getElementById('viewer-log-name').textContent = taskId;
+
+  // Highlight active task in list
+  document.querySelectorAll('.task-item').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.task-item').forEach(el => {
+    if (el.querySelector('.t-id')?.textContent === taskId) el.classList.add('active');
+  });
+
+  // Clear any existing poll
+  if (logPollInterval) { clearInterval(logPollInterval); logPollInterval = null; }
+
+  // Fetch log immediately
+  await fetchLog(taskId);
+
+  // If task is running/starting, auto-poll
+  try {
+    const res = await fetch(`${API}/v1/tasks/${encodeURIComponent(taskId)}`);
+    const task = await res.json();
+    if (task.status === 'running' || task.status === 'starting') {
+      logPollInterval = setInterval(() => fetchLog(taskId), LOG_POLL_MS);
+    }
+  } catch (e) { /* ignore — just won't auto-poll */ }
+}
+
+// ── Controls ───────────────────────────────────────────────────────────
+async function startLoop() {
+  const prompt = document.getElementById('prompt-input').value.trim();
+  if (!prompt) return alert('Enter agent goals first');
+  const interval = parseFloat(document.getElementById('interval-input').value) || 0;
+  try {
+    const res = await fetch(`${API}/v1/loop/start`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, interval })
+    });
+    const data = await res.json();
+    if (data.error) alert(data.error);
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
+async function stopLoop() {
+  try {
+    await fetch(`${API}/v1/loop/stop`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+    });
+  } catch (e) { alert('Failed: ' + e.message); }
+}
+
+// ── Init ───────────────────────────────────────────────────────────────
+window.addEventListener('load', () => {
+  connectSSE();
+  loadGraphs();
+  loadTasks();
+  setInterval(loadTasks, 10000);
+  setInterval(loadGraphs, 30000);
+});
+</script>
+</body>
+</html>
