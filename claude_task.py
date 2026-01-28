@@ -138,7 +138,6 @@ def execute_claude_task(prompt: str, working_dir: str = None, model: str = "clau
                 try:
                     chunk = json.loads(line_str)
                     chunk_type = chunk.get('type', '')
-                    log.write(f"[{chunk_type}] ")
 
                     if chunk_type == 'assistant':
                         message = chunk.get('message', {})
@@ -146,10 +145,37 @@ def execute_claude_task(prompt: str, working_dir: str = None, model: str = "clau
                             if block.get('type') == 'text':
                                 text = block.get('text', '')
                                 output_texts.append(text)
-                                log.write(text)
+                                log.write(f"\n{'─'*50}\n")
+                                log.write(f"ASSISTANT:\n{text}\n")
                             elif block.get('type') == 'tool_use':
                                 tool_name = block.get('name', 'unknown')
-                                log.write(f"\n[Tool: {tool_name}]\n")
+                                tool_input = block.get('input', {})
+                                log.write(f"\n{'─'*50}\n")
+                                log.write(f"TOOL CALL: {tool_name}\n")
+                                # Log tool input — truncate large values
+                                for k, v in tool_input.items():
+                                    val_str = str(v)
+                                    if len(val_str) > 500:
+                                        val_str = val_str[:500] + '...'
+                                    log.write(f"  {k}: {val_str}\n")
+
+                    elif chunk_type == 'user':
+                        # Tool results come back as user messages
+                        message = chunk.get('message', {})
+                        for block in message.get('content', []):
+                            if block.get('type') == 'tool_result':
+                                tool_id = block.get('tool_use_id', '')
+                                content = block.get('content', '')
+                                if isinstance(content, list):
+                                    content = '\n'.join(
+                                        b.get('text', '') for b in content if b.get('type') == 'text'
+                                    )
+                                content_str = str(content)
+                                if len(content_str) > 2000:
+                                    content_str = content_str[:2000] + f'... ({len(content_str)} chars total)'
+                                is_error = block.get('is_error', False)
+                                label = 'TOOL ERROR' if is_error else 'TOOL RESULT'
+                                log.write(f"{label}:\n{content_str}\n")
 
                     elif chunk_type == 'content_block_delta':
                         delta = chunk.get('delta', {})
@@ -162,7 +188,7 @@ def execute_claude_task(prompt: str, working_dir: str = None, model: str = "clau
                         result_text = chunk.get('result', '')
                         if result_text and result_text not in ''.join(output_texts):
                             output_texts.append(result_text)
-                            log.write(f"\n\n{result_text}")
+                            log.write(f"\n\n{'═'*50}\nFINAL RESULT:\n{result_text}\n")
 
                     log.flush()
 

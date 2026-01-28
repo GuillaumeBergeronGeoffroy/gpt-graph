@@ -256,10 +256,26 @@ async function viewGraph(id) {
     const graphData = JSON.parse(JSON.stringify({ nodes, relationships: rels }));
     currentGraphData = graphData;
 
-    // Build links
+    // Normalize node fields (agent graphs use label/type vs properties.name/labels)
+    graphData.nodes.forEach(n => {
+      if (!n.name && n.label) n.name = n.label;
+      if (!n.labels && n.type) n.labels = [n.type];
+      if (!n.properties) n.properties = {};
+      if (!n.properties.name && n.name) n.properties.name = n.name;
+      if (n.description && !n.properties.description) n.properties.description = n.description;
+    });
+
+    // Normalize relationship fields (support both startNodeId/endNodeId and from/to)
     graphData.relationships.forEach(link => {
-      link.source = graphData.nodes.find(n => n.id === link.startNodeId);
-      link.target = graphData.nodes.find(n => n.id === link.endNodeId);
+      const srcId = link.startNodeId ?? link.from ?? link.source;
+      const tgtId = link.endNodeId ?? link.to ?? link.target;
+      link.startNodeId = srcId;
+      link.endNodeId = tgtId;
+      link.source = graphData.nodes.find(n => n.id === srcId || n.id === Number(srcId));
+      link.target = graphData.nodes.find(n => n.id === tgtId || n.id === Number(tgtId));
+      // Normalize label/type
+      if (!link.type && link.label) link.type = link.label;
+      if (!link.label && link.type) link.label = link.type;
     });
     graphData.relationships = graphData.relationships.filter(r => r.source && r.target);
 
@@ -297,8 +313,14 @@ async function viewGraph(id) {
       .style('width', '100%').style('height', '100%');
 
     const g = svg.append('g');
-    const zoom = d3.zoom().scaleExtent([0.15, 4]).on('zoom', e => g.attr('transform', e.transform));
+    let currentZoomTransform = d3.zoomIdentity;
+    const zoom = d3.zoom().scaleExtent([0.15, 4]).on('zoom', e => {
+      g.attr('transform', e.transform);
+      currentZoomTransform = e.transform;
+    });
     svg.call(zoom);
+    // Expose for navigateToNode
+    window._brainZoom = { transform: () => currentZoomTransform, viewer };
 
     const nodeCount = graphData.nodes.length;
     const linkDist = Math.max(80, Math.min(150, 250 / Math.sqrt(nodeCount)));
@@ -435,11 +457,12 @@ function showNodePopup(node, event) {
           ${connections.map(c => {
             const pct = Math.round((c.strength / maxStrength) * 100);
             const cName = c.node.properties?.name || c.node.name || '?';
+            const cId = JSON.stringify(c.node.id).replace(/"/g, '&quot;');
             return `
               <div class="connection-item">
                 <div class="connection-info">
                   <span class="connection-direction">${c.direction}</span>
-                  <span class="connection-name">${escHtml(cName)}</span>
+                  <span class="connection-name" onclick="navigateToNode(${cId}, event)">${escHtml(cName)}</span>
                 </div>
                 <div class="connection-meta">
                   <span class="connection-type">${c.type}</span>
@@ -528,6 +551,24 @@ function showNodePopup(node, event) {
 function hideNodePopup() {
   const el = document.getElementById('node-popup');
   if (el) el.remove();
+}
+
+function navigateToNode(nodeId, evt) {
+  if (!currentGraphData) return;
+  const node = currentGraphData.nodes.find(n => n.id === nodeId || n.id === String(nodeId));
+  if (!node) return;
+  hideNodePopup();
+
+  // Convert node simulation coords to screen coords using current zoom transform
+  let clientX = window.innerWidth / 2, clientY = window.innerHeight / 2;
+  if (window._brainZoom && node.x !== undefined && node.y !== undefined) {
+    const t = window._brainZoom.transform();
+    const viewerRect = window._brainZoom.viewer.getBoundingClientRect();
+    clientX = viewerRect.left + t.x + node.x * t.k;
+    clientY = viewerRect.top + t.y + node.y * t.k;
+  }
+
+  setTimeout(() => showNodePopup(node, { clientX, clientY }), 20);
 }
 
 // ── Tasks ──────────────────────────────────────────────────────────────

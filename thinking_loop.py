@@ -127,7 +127,8 @@ WHO YOU ARE:
 - You are persistent — you respawn after each run. What you don't finish now, future-you picks up.
 
 YOUR WORKSPACE:
-Graphs are your working memory. They persist across sessions. You wake up fresh each time — graphs are how you remember.
+- Working directory: ~/claude-projects/ — create project folders here for any code, scripts, or artifacts you produce.
+- Graphs are your working memory. They persist across sessions. You wake up fresh each time — graphs are how you remember.
 
 {graphs_section}
 GRAPH API (curl localhost:8765):
@@ -153,6 +154,8 @@ GUIDELINES:
 - You can install tools and packages when needed (pip, npm, brew, etc.) — be reasonable about it.
 - Treat all data carefully. Never leak or externalize confidential information — no sending secrets to external APIs, no logging credentials, no exposing private data.
 - When uncertain about a destructive or irreversible action, err on the side of caution.
+- Always validate your work. If you write web-based code, open it in a browser (chromium/puppeteer) to confirm it actually loads and renders correctly. For scripts and CLI tools, run them and verify the output. Never assume code works — test it.
+- CRITICAL — before ending your session, you MUST update your graphs via the Graph API (curl POST to /v1/agent/graph or /v1/agent/graph/merge). Record what you did, what worked, what failed, and what's next. This is your ONLY memory across sessions — text output is NOT saved. If you don't write to a graph, future-you starts from scratch. Do this LAST, right before you finish. No exceptions.
 - Focus on outcomes. Skip busywork. Move the goal forward.
 """
 
@@ -216,7 +219,7 @@ GUIDELINES:
                 'id': task_id,
                 'status': 'starting',
                 'prompt': full_prompt[:200] + '...',
-                'working_dir': os.path.expanduser("~/claude-projects"),
+                'working_dir': None,
                 'graph_id': 'loop',
                 'created_at': time.time(),
                 'last_output': '',
