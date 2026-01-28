@@ -2509,13 +2509,33 @@ IMPORTANT: This task is working with graph ID: "${gid}"
 You MUST include ?id=${gid} on ALL graph API calls to target the correct graph.
 
 READING THE GRAPH:
+  curl -s "http://localhost:8765/v1/graph/summary?id=${gid}"
+    → Returns lightweight summary: node names, types, and counts (START HERE to orient yourself)
+
   curl -s "http://localhost:8765/v1/graph?id=${gid}"
     → Returns full graph JSON: {"nodes": [...], "relationships": [...]}
     Each node: {"id": int, "labels": ["Type"], "properties": {"name": "...", "description": "..."}, ...}
     Each relationship: {"startNodeId": int, "endNodeId": int, "type": "RELATION_TYPE", "properties": {}}
 
-  curl -s "http://localhost:8765/v1/graph/summary?id=${gid}"
-    → Returns lightweight summary: node names, types, and counts (use this first to orient yourself)
+SEARCHING & EXPLORING (use these for large graphs instead of loading everything):
+  curl -s "http://localhost:8765/v1/graph/search?id=${gid}&q=QUERY&limit=20"
+    → Search nodes by name (substring match). Returns: {"query": "...", "count": N, "nodes": [...]}
+
+  curl -s "http://localhost:8765/v1/graph/node?id=${gid}&name=NODE_NAME&depth=2"
+    → Get a specific node + N levels of connected neighbors. Great for exploring local context.
+    Returns: {"center": "...", "depth": N, "nodes": [...], "relationships": [...]}
+
+  curl -s "http://localhost:8765/v1/graph/relations?id=${gid}&node=NODE_NAME&relation=RELATION_TYPE&direction=both"
+    → Get all nodes that have a specific relation to/from a node. direction: in, out, or both
+    Returns: {"center": "...", "count": N, "results": [{"node": {...}, "relation": "...", "direction": "..."}]}
+
+  curl -s "http://localhost:8765/v1/graph/labels?id=${gid}"
+    → List all node types and relationship types with counts. Useful for understanding graph schema.
+    Returns: {"node_types": [{"type": "...", "count": N}], "relationship_types": [...]}
+
+  curl -s "http://localhost:8765/v1/graph/traverse?id=${gid}&start=NODE_NAME&depth=3&direction=out&relation=OPTIONAL_FILTER"
+    → Traverse paths from a starting node. direction: in, out, or both. relation: optional filter.
+    Returns: {"start": "...", "paths": [["NodeA", "--[REL]-->", "NodeB", ...], ...]}
 
 WRITING TO THE GRAPH (add new knowledge):
   curl -s -X POST "http://localhost:8765/v1/graph/merge?id=${gid}" \\
@@ -2537,9 +2557,10 @@ LISTING ALL GRAPHS:
 
 WORKFLOW:
 1. Start by reading the graph summary to understand what's already known
-2. Read the full graph if you need detailed node descriptions or relationship structure
-3. As you discover new concepts, entities, or relationships during your work, merge them into the graph
-4. The graph is the user's persistent knowledge base — treat it as a living document, not throwaway output
+2. Use search/labels to find relevant nodes, then explore with node+depth or relations
+3. Only fetch the full graph if you need complete structure (avoid for large graphs)
+4. As you discover new concepts, entities, or relationships during your work, merge them into the graph
+5. The graph is the user's persistent knowledge base — treat it as a living document, not throwaway output
 `;
 
     // Mode-specific prompts

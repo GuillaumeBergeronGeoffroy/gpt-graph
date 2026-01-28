@@ -5,12 +5,14 @@ import os
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 from graphs import (
     GRAPHS_DIR, AGENT_GRAPHS_DIR,
     load_graph_state, save_graph_state, delete_graph,
-    merge_into_graph, list_graphs
+    merge_into_graph, list_graphs,
+    search_nodes, get_node_with_neighbors, get_nodes_by_relation,
+    get_graph_labels, traverse_graph
 )
 from claude_task import (
     CLAUDE_BINARY, active_tasks,
@@ -35,7 +37,7 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
             for part in parsed.query.split('&'):
                 if '=' in part:
                     k, v = part.split('=', 1)
-                    params[k] = v
+                    params[k] = unquote(v)  # Decode URL-encoded values
         return parsed.path, params
 
     def _graph_id(self, params):
@@ -236,6 +238,56 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                 ]
             }
             self._json_response(200, summary)
+
+        # ============ GRANULAR GRAPH QUERY ENDPOINTS ============
+
+        elif path == '/v1/graph/search':
+            # Search nodes by name: GET /v1/graph/search?id=X&q=query&limit=50
+            query = params.get('q', '')
+            limit = int(params.get('limit', '50'))
+            results = search_nodes(graph_id, query, limit)
+            self._json_response(200, {"query": query, "count": len(results), "nodes": results})
+
+        elif path == '/v1/graph/node':
+            # Get node with neighbors: GET /v1/graph/node?id=X&name=Y&depth=2
+            node_name = params.get('name', '')
+            node_id = params.get('node_id')
+            if node_id:
+                node_id = int(node_id)
+            depth = int(params.get('depth', '1'))
+            result = get_node_with_neighbors(graph_id, node_id, node_name, depth)
+            if result:
+                self._json_response(200, result)
+            else:
+                self._json_response(404, {"error": "Node not found"})
+
+        elif path == '/v1/graph/relations':
+            # Get nodes by relation: GET /v1/graph/relations?id=X&node=Y&relation=Z&direction=both
+            node_name = params.get('node', '')
+            relation = params.get('relation')
+            direction = params.get('direction', 'both')
+            result = get_nodes_by_relation(graph_id, node_name, relation, direction)
+            if 'error' in result:
+                self._json_response(404, result)
+            else:
+                self._json_response(200, result)
+
+        elif path == '/v1/graph/labels':
+            # Get all labels/types: GET /v1/graph/labels?id=X
+            result = get_graph_labels(graph_id)
+            self._json_response(200, result)
+
+        elif path == '/v1/graph/traverse':
+            # Traverse from node: GET /v1/graph/traverse?id=X&start=Y&direction=out&depth=3&relation=Z
+            start_name = params.get('start', '')
+            direction = params.get('direction', 'out')
+            depth = int(params.get('depth', '3'))
+            relation_filter = params.get('relation')
+            result = traverse_graph(graph_id, start_name, direction, depth, relation_filter)
+            if 'error' in result:
+                self._json_response(404, result)
+            else:
+                self._json_response(200, result)
 
         elif path == '/v1/agent/graphs':
             self._json_response(200, {"graphs": list_graphs(AGENT_GRAPHS_DIR)})
