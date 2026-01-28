@@ -56,6 +56,7 @@ All graph endpoints accept `?id=<graph_id>` to target a specific graph (defaults
 | GET | `/v1/graph?id=X` | Get full graph state |
 | POST | `/v1/graph?id=X` | Save/replace graph state |
 | POST | `/v1/graph/merge?id=X` | Merge new nodes into graph |
+| DELETE | `/v1/graph?id=X` | Delete a graph |
 
 ### Granular Graph Queries
 
@@ -162,9 +163,10 @@ gpt-graph/
 ```
 
 **Storage locations:**
-- Client graphs: IndexedDB in browser
-- Server graphs: `~/.gpt-graph/graphs/{graph_id}.json`
+- Graphs: `~/.gpt-graph/graphs/{graph_id}.json` (server is single source of truth)
 - Agent graphs: `~/.gpt-graph/agent-graphs/{graph_id}.json`
+- Chat history: IndexedDB `gestalt-chats` (per-graph, can be large)
+- Current graph ID: localStorage (`gestalt-currentGraphId`)
 - Task logs: `~/claude-projects/.logs/{task_id}.log`
 - Task prompts: `~/claude-projects/.logs/{task_id}-prompt.txt`
 

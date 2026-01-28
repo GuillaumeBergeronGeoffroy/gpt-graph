@@ -385,9 +385,14 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
         path, params = self._parse_path()
         graph_id = self._graph_id(params)
 
-        if path == '/v1/agent/graph':
+        if path == '/v1/graph':
+            deleted = delete_graph(graph_id)
+            self._json_response(200 if deleted else 404, {"deleted": deleted, "id": graph_id})
+
+        elif path == '/v1/agent/graph':
             deleted = delete_graph(graph_id, AGENT_GRAPHS_DIR)
             self._json_response(200 if deleted else 404, {"deleted": deleted})
+
         else:
             self.send_response(404)
             self.end_headers()

@@ -1,215 +1,258 @@
-// IndexedDB Storage for Gestalt
-// Replaces localStorage with unlimited storage + multi-graph support
+// Storage for Gestalt
+// Server is the single source of truth for graph data
+// Chat history stored in IndexedDB (can be large, not needed by Claude Code)
 
-const DB_NAME = 'gestalt-db';
-const DB_VERSION = 1;
+const SERVER_URL = 'http://localhost:8765';
 
-let db = null;
-let currentGraphId = null;
+let currentGraphId = localStorage.getItem('gestalt-currentGraphId') || null;
+let chatDB = null;
 
-// Initialize IndexedDB
-function initDB() {
+// ============ CHAT INDEXEDDB SETUP ============
+
+function initChatDB() {
     return new Promise((resolve, reject) => {
-        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        const request = indexedDB.open('gestalt-chats', 1);
 
         request.onerror = () => {
-            console.error('IndexedDB error:', request.error);
+            console.error('Chat DB error:', request.error);
             reject(request.error);
         };
 
         request.onsuccess = () => {
-            db = request.result;
-            console.log('IndexedDB initialized');
-            resolve(db);
+            chatDB = request.result;
+            resolve(chatDB);
         };
 
         request.onupgradeneeded = (event) => {
-            const database = event.target.result;
-
-            // Graphs store - each graph has its own entry
-            if (!database.objectStoreNames.contains('graphs')) {
-                const graphStore = database.createObjectStore('graphs', { keyPath: 'id' });
-                graphStore.createIndex('name', 'name', { unique: false });
-                graphStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+            const db = event.target.result;
+            if (!db.objectStoreNames.contains('chats')) {
+                db.createObjectStore('chats', { keyPath: 'graphId' });
             }
-
-            // Chat history store - separate from graphs
-            if (!database.objectStoreNames.contains('chats')) {
-                const chatStore = database.createObjectStore('chats', { keyPath: 'graphId' });
-            }
-
-            // Settings store
-            if (!database.objectStoreNames.contains('settings')) {
-                database.createObjectStore('settings', { keyPath: 'key' });
-            }
-
-            console.log('IndexedDB schema created');
         };
     });
 }
 
-// ============ GRAPH OPERATIONS ============
-
-function generateGraphId() {
-    return 'graph-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
-}
-
-async function saveGraph(graphData, name = null) {
-    if (!db) await initDB();
-
-    const id = currentGraphId || generateGraphId();
-    currentGraphId = id;
-
-    // Try to get existing graph to preserve name and createdAt
-    let existingGraph = null;
-    try {
-        const tx = db.transaction('graphs', 'readonly');
-        const store = tx.objectStore('graphs');
-        existingGraph = await new Promise((resolve) => {
-            const req = store.get(id);
-            req.onsuccess = () => resolve(req.result);
-            req.onerror = () => resolve(null);
-        });
-    } catch (e) {
-        // Ignore errors, just means no existing graph
+// Migrate chats from old 'gestalt-db' to new 'gestalt-chats' if needed
+async function migrateLegacyChats() {
+    if (localStorage.getItem('gestalt-chats-migrated-v3')) {
+        return;
     }
 
+    return new Promise((resolve) => {
+        try {
+            const request = indexedDB.open('gestalt-db', 1);
+
+            request.onerror = () => {
+                localStorage.setItem('gestalt-chats-migrated-v3', 'true');
+                resolve();
+            };
+
+            request.onsuccess = () => {
+                const oldDB = request.result;
+
+                if (!oldDB.objectStoreNames.contains('chats')) {
+                    localStorage.setItem('gestalt-chats-migrated-v3', 'true');
+                    oldDB.close();
+                    resolve();
+                    return;
+                }
+
+                const tx = oldDB.transaction('chats', 'readonly');
+                const store = tx.objectStore('chats');
+                const getAllRequest = store.getAll();
+
+                getAllRequest.onsuccess = async () => {
+                    const chats = getAllRequest.result || [];
+                    let migratedCount = 0;
+
+                    for (const chat of chats) {
+                        if (chat.graphId && chat.history && chat.history.length > 0) {
+                            await saveChatForGraph(chat.graphId, chat.history);
+                            migratedCount++;
+                        }
+                    }
+
+                    if (migratedCount > 0) {
+                        console.log(`Migrated ${migratedCount} chat histories to new DB`);
+                    }
+
+                    // Also migrate currentGraphId from old settings
+                    if (oldDB.objectStoreNames.contains('settings') && !currentGraphId) {
+                        const settingsTx = oldDB.transaction('settings', 'readonly');
+                        const settingsStore = settingsTx.objectStore('settings');
+                        const getReq = settingsStore.get('currentGraphId');
+                        getReq.onsuccess = () => {
+                            if (getReq.result?.value) {
+                                currentGraphId = getReq.result.value;
+                                localStorage.setItem('gestalt-currentGraphId', currentGraphId);
+                                console.log('Migrated currentGraphId:', currentGraphId);
+                            }
+                        };
+                    }
+
+                    localStorage.setItem('gestalt-chats-migrated-v3', 'true');
+                    oldDB.close();
+                    resolve();
+                };
+
+                getAllRequest.onerror = () => {
+                    localStorage.setItem('gestalt-chats-migrated-v3', 'true');
+                    oldDB.close();
+                    resolve();
+                };
+            };
+
+            request.onupgradeneeded = () => {
+                localStorage.setItem('gestalt-chats-migrated-v3', 'true');
+                resolve();
+            };
+        } catch (e) {
+            console.warn('Legacy chat migration failed:', e);
+            localStorage.setItem('gestalt-chats-migrated-v3', 'true');
+            resolve();
+        }
+    });
+}
+
+// ============ GRAPH OPERATIONS (Server-backed) ============
+
+function generateGraphId() {
+    return 'graph-' + Date.now() + '-' + Math.random().toString(36).substring(2, 11);
+}
+
+async function saveGraph(graphData = {}, name = null) {
+    const id = currentGraphId || generateGraphId();
+    currentGraphId = id;
+    localStorage.setItem('gestalt-currentGraphId', id);
+
     const graph = {
-        id: id,
-        name: name || existingGraph?.name || graphData.name || 'Untitled Graph',
-        data: {
-            merged_object: graphData.merged_object || merged_object,
-            history: graphData.history || merged_object_history,
-            historyIndex: graphData.historyIndex ?? merged_object_history_index
-        },
-        nodeCount: (graphData.merged_object || merged_object)?.nodes?.length || 0,
-        relCount: (graphData.merged_object || merged_object)?.relationships?.length || 0,
-        createdAt: existingGraph?.createdAt || graphData.createdAt || Date.now(),
-        updatedAt: Date.now()
+        nodes: graphData.merged_object?.nodes || merged_object?.nodes || [],
+        relationships: graphData.merged_object?.relationships || merged_object?.relationships || [],
+        title: name || graphData.name || '',
+        // Include history for undo/redo support
+        history: graphData.history || merged_object_history || [],
+        historyIndex: graphData.historyIndex ?? merged_object_history_index ?? 0
     };
 
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction('graphs', 'readwrite');
-        const store = tx.objectStore('graphs');
-        const request = store.put(graph);
+    try {
+        const response = await fetch(`${SERVER_URL}/v1/graph?id=${encodeURIComponent(id)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(graph)
+        });
 
-        request.onsuccess = () => {
-            // Save current graph ID to settings
-            saveCurrentGraphId(id);
-            resolve(id);
-        };
-        request.onerror = () => reject(request.error);
-    });
+        if (!response.ok) throw new Error(`Server error: ${response.status}`);
+        const result = await response.json();
+        console.log('Saved graph to server:', id, result);
+        return id;
+    } catch (e) {
+        console.error('Failed to save graph:', e.message);
+        throw e;
+    }
 }
 
 async function loadGraph(graphId) {
-    if (!db) await initDB();
+    try {
+        const response = await fetch(`${SERVER_URL}/v1/graph?id=${encodeURIComponent(graphId)}`);
+        if (!response.ok) {
+            if (response.status === 404) return null;
+            throw new Error(`Server error: ${response.status}`);
+        }
 
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction('graphs', 'readonly');
-        const store = tx.objectStore('graphs');
-        const request = store.get(graphId);
+        const graph = await response.json();
+        currentGraphId = graphId;
+        localStorage.setItem('gestalt-currentGraphId', graphId);
 
-        request.onsuccess = () => {
-            const graph = request.result;
-            if (graph) {
-                currentGraphId = graph.id;
-                saveCurrentGraphId(graph.id);
-                resolve(graph);
-            } else {
-                resolve(null);
-            }
+        // Return in the format expected by the app
+        return {
+            id: graphId,
+            name: graph.title || graphId,
+            data: {
+                merged_object: {
+                    nodes: graph.nodes || [],
+                    relationships: graph.relationships || []
+                },
+                history: graph.history || [],
+                historyIndex: graph.historyIndex || 0
+            },
+            nodeCount: graph.nodes?.length || 0,
+            relCount: graph.relationships?.length || 0
         };
-        request.onerror = () => reject(request.error);
-    });
+    } catch (e) {
+        console.error('Failed to load graph:', e.message);
+        return null;
+    }
 }
 
 async function listGraphs() {
-    if (!db) await initDB();
+    try {
+        const response = await fetch(`${SERVER_URL}/v1/graphs`);
+        if (!response.ok) throw new Error(`Server error: ${response.status}`);
 
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction('graphs', 'readonly');
-        const store = tx.objectStore('graphs');
-        const index = store.index('updatedAt');
-        const request = index.openCursor(null, 'prev'); // Most recent first
-
-        const graphs = [];
-        request.onsuccess = (event) => {
-            const cursor = event.target.result;
-            if (cursor) {
-                graphs.push({
-                    id: cursor.value.id,
-                    name: cursor.value.name,
-                    nodeCount: cursor.value.nodeCount,
-                    relCount: cursor.value.relCount,
-                    updatedAt: cursor.value.updatedAt,
-                    createdAt: cursor.value.createdAt
-                });
-                cursor.continue();
-            } else {
-                resolve(graphs);
-            }
-        };
-        request.onerror = () => reject(request.error);
-    });
+        const data = await response.json();
+        return (data.graphs || []).map(g => ({
+            id: g.id,
+            name: g.title || g.id,
+            nodeCount: g.node_count || 0,
+            relCount: g.relationship_count || 0,
+            updatedAt: g.updated_at || g.modified_at,
+            createdAt: g.created_at
+        }));
+    } catch (e) {
+        console.error('Failed to list graphs:', e.message);
+        return [];
+    }
 }
 
 async function deleteGraph(graphId) {
-    if (!db) await initDB();
+    try {
+        const response = await fetch(`${SERVER_URL}/v1/graph?id=${encodeURIComponent(graphId)}`, {
+            method: 'DELETE'
+        });
 
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(['graphs', 'chats'], 'readwrite');
+        if (!response.ok) throw new Error(`Server error: ${response.status}`);
 
-        // Delete graph
-        tx.objectStore('graphs').delete(graphId);
+        if (currentGraphId === graphId) {
+            currentGraphId = null;
+            localStorage.removeItem('gestalt-currentGraphId');
+        }
 
-        // Delete associated chat
-        tx.objectStore('chats').delete(graphId);
+        // Also delete chat for this graph
+        await deleteChatForGraph(graphId);
 
-        tx.oncomplete = () => {
-            if (currentGraphId === graphId) {
-                currentGraphId = null;
-            }
-            resolve();
-        };
-        tx.onerror = () => reject(tx.error);
-    });
+        return true;
+    } catch (e) {
+        console.error('Failed to delete graph:', e.message);
+        return false;
+    }
 }
 
 async function renameGraph(graphId, newName) {
-    if (!db) await initDB();
-
     const graph = await loadGraph(graphId);
     if (graph) {
         graph.name = newName;
-        graph.updatedAt = Date.now();
-
-        return new Promise((resolve, reject) => {
-            const tx = db.transaction('graphs', 'readwrite');
-            const store = tx.objectStore('graphs');
-            const request = store.put(graph);
-
-            request.onsuccess = () => resolve();
-            request.onerror = () => reject(request.error);
+        await saveGraph({
+            merged_object: graph.data.merged_object,
+            history: graph.data.history,
+            historyIndex: graph.data.historyIndex,
+            name: newName
         });
     }
 }
 
-// ============ CHAT OPERATIONS ============
+// ============ CHAT OPERATIONS (IndexedDB) ============
 
-async function saveChatForGraph(graphId, chatHistory) {
-    if (!db) await initDB();
-
-    const chat = {
-        graphId: graphId,
-        history: chatHistory,
-        updatedAt: Date.now()
-    };
+async function saveChatForGraph(graphId, chatHistoryData) {
+    if (!chatDB) await initChatDB();
 
     return new Promise((resolve, reject) => {
-        const tx = db.transaction('chats', 'readwrite');
+        const tx = chatDB.transaction('chats', 'readwrite');
         const store = tx.objectStore('chats');
-        const request = store.put(chat);
+        const request = store.put({
+            graphId: graphId,
+            history: chatHistoryData,
+            updatedAt: Date.now()
+        });
 
         request.onsuccess = () => resolve();
         request.onerror = () => reject(request.error);
@@ -217,10 +260,10 @@ async function saveChatForGraph(graphId, chatHistory) {
 }
 
 async function loadChatForGraph(graphId) {
-    if (!db) await initDB();
+    if (!chatDB) await initChatDB();
 
     return new Promise((resolve, reject) => {
-        const tx = db.transaction('chats', 'readonly');
+        const tx = chatDB.transaction('chats', 'readonly');
         const store = tx.objectStore('chats');
         const request = store.get(graphId);
 
@@ -231,102 +274,67 @@ async function loadChatForGraph(graphId) {
     });
 }
 
-// ============ SETTINGS ============
-
-async function saveCurrentGraphId(graphId) {
-    if (!db) await initDB();
+async function deleteChatForGraph(graphId) {
+    if (!chatDB) await initChatDB();
 
     return new Promise((resolve, reject) => {
-        const tx = db.transaction('settings', 'readwrite');
-        const store = tx.objectStore('settings');
-        const request = store.put({ key: 'currentGraphId', value: graphId });
+        const tx = chatDB.transaction('chats', 'readwrite');
+        const store = tx.objectStore('chats');
+        const request = store.delete(graphId);
 
         request.onsuccess = () => resolve();
         request.onerror = () => reject(request.error);
     });
 }
 
-async function getCurrentGraphId() {
-    if (!db) await initDB();
+// ============ SETTINGS ============
 
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction('settings', 'readonly');
-        const store = tx.objectStore('settings');
-        const request = store.get('currentGraphId');
-
-        request.onsuccess = () => {
-            resolve(request.result?.value || null);
-        };
-        request.onerror = () => reject(request.error);
-    });
+function saveCurrentGraphId(graphId) {
+    currentGraphId = graphId;
+    if (graphId) {
+        localStorage.setItem('gestalt-currentGraphId', graphId);
+    } else {
+        localStorage.removeItem('gestalt-currentGraphId');
+    }
 }
 
-// ============ MIGRATION FROM LOCALSTORAGE ============
-
-async function migrateFromLocalStorage() {
-    try {
-        const graphHistory = localStorage.getItem('graphHistory');
-        const activityLog = localStorage.getItem('activityLog');
-        const chatHistoryLS = localStorage.getItem('chatHistory');
-
-        if (graphHistory) {
-            const history = JSON.parse(graphHistory);
-            if (history && history.length > 0) {
-                // Create a new graph from localStorage data
-                const lastEntry = history[history.length - 1];
-
-                merged_object_history = history;
-                merged_object_history_index = history.length - 1;
-                merged_object = JSON.parse(JSON.stringify(lastEntry.merged_object));
-
-                // Save to IndexedDB
-                const graphId = await saveGraph({
-                    merged_object: merged_object,
-                    history: history,
-                    historyIndex: merged_object_history_index
-                }, 'Migrated Graph');
-
-                console.log('Migrated graph from localStorage:', graphId);
-
-                // Migrate chat history if exists
-                if (chatHistoryLS) {
-                    const chat = JSON.parse(chatHistoryLS);
-                    await saveChatForGraph(graphId, chat);
-                }
-
-                // Clear localStorage after successful migration
-                localStorage.removeItem('graphHistory');
-                localStorage.removeItem('activityLog');
-                localStorage.removeItem('chatHistory');
-
-                return graphId;
-            }
-        }
-    } catch (e) {
-        console.warn('Migration from localStorage failed:', e);
-    }
-    return null;
+function getCurrentGraphId() {
+    return currentGraphId || localStorage.getItem('gestalt-currentGraphId');
 }
 
 // ============ INITIALIZATION ============
 
 async function initializeStorage() {
-    await initDB();
+    // Initialize chat DB
+    await initChatDB();
 
-    // Try to migrate from localStorage first
-    const migratedId = await migrateFromLocalStorage();
+    // Migrate from legacy IndexedDB if needed
+    await migrateLegacyChats();
 
-    if (migratedId) {
-        currentGraphId = migratedId;
-        return migratedId;
+    // Check if server is available
+    try {
+        const response = await fetch(`${SERVER_URL}/health`);
+        if (!response.ok) throw new Error('Server not healthy');
+        console.log('Connected to server');
+    } catch (e) {
+        console.error('Server not available. Please start server.py');
+        return null;
     }
 
     // Load last used graph
-    const lastGraphId = await getCurrentGraphId();
+    const lastGraphId = getCurrentGraphId();
     if (lastGraphId) {
         const graph = await loadGraph(lastGraphId);
         if (graph) {
-            currentGraphId = graph.id;
+            return graph;
+        }
+    }
+
+    // No saved graph, check if server has any graphs
+    const graphs = await listGraphs();
+    if (graphs.length > 0) {
+        const graph = await loadGraph(graphs[0].id);
+        if (graph) {
             return graph;
         }
     }
@@ -346,108 +354,22 @@ function triggerAutoSave() {
             try {
                 await saveGraph({});
                 console.log('Auto-saved graph');
-                // Also sync to server for Claude Code integration
-                triggerServerSync();
             } catch (e) {
                 console.warn('Auto-save failed:', e);
             }
         }
-    }, 2000); // Debounce 2 seconds
+    }, 2000);
 }
 
-// ============ SERVER SYNC (for Claude Code integration) ============
-
-const SERVER_URL = 'http://localhost:8765';
-
-async function syncToServer() {
-    /**
-     * Push current graph state to server so Claude Code can read it.
-     */
-    if (!merged_object?.nodes?.length) {
-        console.warn('No graph to sync');
-        return null;
-    }
-
-    try {
-        const gid = currentGraphId || 'default';
-        const response = await fetch(`${SERVER_URL}/v1/graph?id=${encodeURIComponent(gid)}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                nodes: merged_object.nodes,
-                relationships: merged_object.relationships || []
-            })
-        });
-
-        if (!response.ok) throw new Error(`Server error: ${response.status}`);
-
-        const result = await response.json();
-        console.log('Synced to server:', result);
-        return result;
-    } catch (e) {
-        console.warn('Server sync failed (is server.py running?):', e.message);
-        return null;
-    }
-}
-
-async function pullFromServer() {
-    /**
-     * Pull graph state from server (after Claude Code has modified it).
-     * Merges server state into current graph.
-     */
-    try {
-        const gid = currentGraphId || 'default';
-        const response = await fetch(`${SERVER_URL}/v1/graph?id=${encodeURIComponent(gid)}`);
-        if (!response.ok) throw new Error(`Server error: ${response.status}`);
-
-        const serverGraph = await response.json();
-
-        if (serverGraph?.nodes?.length > 0) {
-            // Merge server nodes into current graph
-            const existingNames = new Set(
-                merged_object.nodes.map(n => n.name || n.properties?.name)
-            );
-
-            let addedCount = 0;
-            for (const node of serverGraph.nodes) {
-                const name = node.name || node.properties?.name;
-                if (name && !existingNames.has(name)) {
-                    // Assign new ID
-                    const maxId = Math.max(...merged_object.nodes.map(n => n.id || 0), 0);
-                    merged_object.nodes.push({
-                        ...node,
-                        id: maxId + 1 + addedCount
-                    });
-                    existingNames.add(name);
-                    addedCount++;
-                }
-            }
-
-            if (addedCount > 0) {
-                console.log(`Pulled ${addedCount} new nodes from server`);
-                renderGraph(merged_object);
-                triggerAutoSave();
-            }
-
-            return { added: addedCount, total: merged_object.nodes.length };
-        }
-
-        return { added: 0, total: merged_object?.nodes?.length || 0 };
-    } catch (e) {
-        console.warn('Server pull failed:', e.message);
-        return null;
-    }
-}
+// ============ CLAUDE CODE TASK EXECUTION ============
 
 async function executeClaudeTask(prompt, options = {}) {
-    /**
-     * Execute a Claude Code task that can research, read files, etc.
-     * Returns the task ID for polling.
-     */
     const { workingDir, async: asyncMode = true } = options;
 
-    // First sync current graph to server so Claude can see it
-    await syncToServer();
+    // Save current graph first so Claude can see latest state
+    if (merged_object?.nodes?.length > 0) {
+        await saveGraph({});
+    }
 
     try {
         const response = await fetch(`${SERVER_URL}/v1/execute`, {
@@ -470,9 +392,6 @@ async function executeClaudeTask(prompt, options = {}) {
 }
 
 async function pollTaskStatus(taskId, { onProgress, onComplete, interval = 2000 } = {}) {
-    /**
-     * Poll a Claude task for completion.
-     */
     const poll = async () => {
         try {
             const response = await fetch(`${SERVER_URL}/v1/tasks/${taskId}`);
@@ -481,14 +400,12 @@ async function pollTaskStatus(taskId, { onProgress, onComplete, interval = 2000 
             if (onProgress) onProgress(task);
 
             if (task.status === 'completed') {
-                // Pull any new graph data from server
-                await pullFromServer();
+                await reloadGraphFromServer();
                 if (onComplete) onComplete(task);
                 return task;
             } else if (task.status === 'failed') {
                 throw new Error(task.error || 'Task failed');
             } else {
-                // Still running, poll again
                 return new Promise(resolve => {
                     setTimeout(() => resolve(poll()), interval);
                 });
@@ -502,13 +419,45 @@ async function pollTaskStatus(taskId, { onProgress, onComplete, interval = 2000 
     return poll();
 }
 
-// Auto-sync to server when graph changes (debounced)
-let serverSyncTimeout = null;
+// ============ RELOAD FROM SERVER ============
 
-function triggerServerSync() {
-    if (serverSyncTimeout) clearTimeout(serverSyncTimeout);
+async function reloadGraphFromServer() {
+    const gid = currentGraphId || 'default';
 
-    serverSyncTimeout = setTimeout(async () => {
-        await syncToServer();
-    }, 5000); // Sync every 5 seconds after changes
+    try {
+        const response = await fetch(`${SERVER_URL}/v1/graph?id=${encodeURIComponent(gid)}`);
+        if (!response.ok) throw new Error(`Server error: ${response.status}`);
+
+        const serverGraph = await response.json();
+
+        if (serverGraph?.nodes?.length > 0) {
+            const oldCount = merged_object?.nodes?.length || 0;
+            merged_object = {
+                nodes: serverGraph.nodes,
+                relationships: serverGraph.relationships || []
+            };
+
+            const newCount = merged_object.nodes.length;
+            if (newCount !== oldCount) {
+                console.log(`Reloaded graph from server: ${oldCount} -> ${newCount} nodes`);
+            }
+
+            renderGraph(merged_object);
+            return { reloaded: true, nodeCount: newCount };
+        }
+
+        return { reloaded: false, nodeCount: merged_object?.nodes?.length || 0 };
+    } catch (e) {
+        console.warn('Failed to reload from server:', e.message);
+        return null;
+    }
+}
+
+// Legacy aliases for compatibility
+async function syncToServer() {
+    return saveGraph({});
+}
+
+async function pullFromServer() {
+    return reloadGraphFromServer();
 }
