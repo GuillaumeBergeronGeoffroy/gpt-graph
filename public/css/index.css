@@ -2959,6 +2959,54 @@
       font-size: 12px;
       margin-left: 6px;
     }
+    .brain-workspace-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.5);
+    }
+    .brain-workspace-row label {
+      flex-shrink: 0;
+    }
+    .brain-workspace-row select {
+      flex: 1;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 4px;
+      color: #fff;
+      padding: 4px 8px;
+      font-size: 12px;
+    }
+    .brain-workspace-row select option {
+      background: #1a1a24;
+      color: #fff;
+    }
+    .brain-ws-btn {
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      background: rgba(255, 255, 255, 0.05);
+      color: rgba(255, 255, 255, 0.6);
+      font-size: 14px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s;
+    }
+    .brain-ws-btn:hover {
+      background: rgba(76, 175, 80, 0.2);
+      border-color: rgba(76, 175, 80, 0.4);
+      color: #81c784;
+    }
+    .brain-ws-del:hover {
+      background: rgba(244, 67, 54, 0.2);
+      border-color: rgba(244, 67, 54, 0.4);
+      color: #ef9a9a;
+    }
     .brain-btn-row {
       display: flex;
       gap: 8px;
@@ -3035,6 +3083,24 @@
     .brain-graph-time {
       color: rgba(255, 255, 255, 0.3);
       font-size: 10px;
+    }
+    .brain-graph-delete {
+      opacity: 0;
+      background: rgba(244, 67, 54, 0.15);
+      border: 1px solid rgba(244, 67, 54, 0.3);
+      color: #ef9a9a;
+      border-radius: 4px;
+      width: 18px;
+      height: 18px;
+      font-size: 12px;
+      line-height: 1;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .brain-graph-item:hover .brain-graph-delete { opacity: 1; }
+    .brain-graph-delete:hover {
+      background: rgba(244, 67, 54, 0.3);
+      color: #f44336;
     }
     .brain-feed {
       max-height: 250px;

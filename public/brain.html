@@ -14,6 +14,13 @@
         <h1>Brain Monitor</h1>
         <span id="status-badge" class="badge stopped">Stopped</span>
         <span id="iteration-badge" class="badge iter">#0</span>
+        <div class="workspace-selector">
+          <select id="workspace-select" onchange="switchWorkspace(this.value)">
+            <option value="default">default</option>
+          </select>
+          <button class="ws-btn ws-add" onclick="createWorkspace()" title="New workspace">+</button>
+          <button class="ws-btn ws-del" onclick="deleteCurrentWorkspace()" title="Delete workspace">&times;</button>
+        </div>
       </div>
       <div class="header-right">
         <span id="connection-dot" class="dot disconnected"></span>
@@ -74,10 +81,18 @@
 
 <script>
 const API = 'http://localhost:8765';
-const AGENT_API = API + '/v1/agent';  // Agent's own workspace
+let currentWorkspace = 'default';
 let sse = null;
 let currentGraphSim = null; // Track active D3 simulation
 let currentGraphData = null; // Track loaded graph for popup connections
+
+function getAgentAPI() {
+  return `${API}/v1/agent`;
+}
+
+function workspaceParam() {
+  return `workspace=${encodeURIComponent(currentWorkspace)}`;
+}
 
 // ── SSE ────────────────────────────────────────────────────────────────
 function connectSSE() {
@@ -161,28 +176,144 @@ function escHtml(s) {
   return d.innerHTML;
 }
 
+// ── Workspaces ────────────────────────────────────────────────────────
+async function loadWorkspaces() {
+  try {
+    const res = await fetch(`${API}/v1/workspaces`);
+    const data = await res.json();
+    const select = document.getElementById('workspace-select');
+    const currentVal = select.value;
+    select.innerHTML = '';
+    (data.workspaces || []).forEach(ws => {
+      const opt = document.createElement('option');
+      opt.value = ws.id;
+      opt.textContent = `${ws.id} (${ws.graph_count} graphs)`;
+      if (ws.id === currentWorkspace) opt.selected = true;
+      select.appendChild(opt);
+    });
+    // Restore selection if still valid
+    if ([...select.options].some(o => o.value === currentVal)) {
+      select.value = currentVal;
+    }
+  } catch (e) {
+    console.error('Failed to load workspaces:', e);
+  }
+}
+
+async function switchWorkspace(workspace) {
+  currentWorkspace = workspace;
+  // Also update the thinking loop's workspace
+  try {
+    await fetch(`${API}/v1/loop/workspace`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspace })
+    });
+  } catch (e) {
+    console.error('Failed to switch loop workspace:', e);
+  }
+  loadGraphs();
+}
+
+async function createWorkspace() {
+  const name = prompt('Enter new workspace name:');
+  if (!name || !name.trim()) return;
+  try {
+    const res = await fetch(`${API}/v1/workspaces`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name.trim() })
+    });
+    if (res.ok) {
+      await loadWorkspaces();
+      // Switch to the new workspace
+      document.getElementById('workspace-select').value = name.trim();
+      switchWorkspace(name.trim());
+    } else {
+      const data = await res.json();
+      alert(data.error || 'Failed to create workspace');
+    }
+  } catch (e) {
+    alert('Failed to create workspace: ' + e.message);
+  }
+}
+
+async function deleteCurrentWorkspace() {
+  if (currentWorkspace === 'default') {
+    alert('Cannot delete the default workspace');
+    return;
+  }
+  if (!confirm(`Delete workspace "${currentWorkspace}" and ALL its graphs? This cannot be undone.`)) return;
+  try {
+    const res = await fetch(`${API}/v1/workspaces?name=${encodeURIComponent(currentWorkspace)}`, {
+      method: 'DELETE'
+    });
+    if (res.ok) {
+      currentWorkspace = 'default';
+      await loadWorkspaces();
+      document.getElementById('workspace-select').value = 'default';
+      loadGraphs();
+    } else {
+      const data = await res.json();
+      alert(data.error || 'Failed to delete workspace');
+    }
+  } catch (e) {
+    alert('Failed to delete workspace: ' + e.message);
+  }
+}
+
 // ── Graphs ─────────────────────────────────────────────────────────────
 async function loadGraphs() {
   try {
-    const res = await fetch(`${AGENT_API}/graphs`);
+    const res = await fetch(`${getAgentAPI()}/graphs?${workspaceParam()}`);
     const data = await res.json();
     const list = document.getElementById('graphs-list');
     list.innerHTML = '';
     (data.graphs || []).forEach(g => {
       const div = document.createElement('div');
       div.className = 'graph-item';
-      div.onclick = () => viewGraph(g.id);
+      div.onclick = (e) => {
+        if (!e.target.classList.contains('g-delete')) viewGraph(g.id);
+      };
       const mod = new Date(g.modified_at * 1000).toLocaleString();
       div.innerHTML = `
         <span class="g-name">${escHtml(g.title || g.id)}</span>
         <span class="g-meta">${g.node_count}n / ${g.relationship_count}r</span>
         <span class="g-time">${mod}</span>
+        <button class="g-delete" onclick="deleteAgentGraph('${escHtml(g.id)}', event)" title="Delete graph">&times;</button>
       `;
       if (g.description) div.title = g.description;
       list.appendChild(div);
     });
   } catch (e) {
     console.error('Failed to load graphs:', e);
+  }
+}
+
+async function deleteAgentGraph(graphId, event) {
+  event.stopPropagation();
+  if (!confirm(`Delete graph "${graphId}"? This cannot be undone.`)) return;
+
+  try {
+    const res = await fetch(`${getAgentAPI()}/graph?${workspaceParam()}&id=${encodeURIComponent(graphId)}`, {
+      method: 'DELETE'
+    });
+    if (res.ok) {
+      console.log('Deleted graph:', graphId);
+      loadGraphs(); // Refresh list
+      // Clear viewer if this was the current graph
+      if (document.getElementById('viewer-graph-name').textContent === graphId) {
+        document.getElementById('viewer-graph-name').textContent = 'select a graph';
+        document.getElementById('graph-viewer').innerHTML = '';
+        document.getElementById('graph-meta').innerHTML = '';
+        document.getElementById('graph-stats').textContent = '';
+      }
+    } else {
+      alert('Failed to delete graph');
+    }
+  } catch (e) {
+    console.error('Delete error:', e);
+    alert('Failed to delete graph: ' + e.message);
   }
 }
 
@@ -222,7 +353,7 @@ async function viewGraph(id) {
   console.log('viewGraph called:', id);
   document.getElementById('viewer-graph-name').textContent = id;
   try {
-    const res = await fetch(`${AGENT_API}/graph?id=${encodeURIComponent(id)}`);
+    const res = await fetch(`${getAgentAPI()}/graph?${workspaceParam()}&id=${encodeURIComponent(id)}`);
     const graph = await res.json();
     const nodes = graph.nodes || [];
     const rels = graph.relationships || [];
@@ -676,12 +807,31 @@ async function stopLoop() {
 }
 
 // ── Init ───────────────────────────────────────────────────────────────
-window.addEventListener('load', () => {
+window.addEventListener('load', async () => {
+  // Get current loop status to sync workspace
+  try {
+    const res = await fetch(`${API}/v1/loop/status`);
+    const status = await res.json();
+    if (status.workspace) {
+      currentWorkspace = status.workspace;
+    }
+    if (status.prompt) {
+      document.getElementById('prompt-input').value = status.prompt;
+    }
+    updateStatus(status);
+  } catch (e) {
+    console.error('Failed to get loop status:', e);
+  }
+
+  await loadWorkspaces();
+  document.getElementById('workspace-select').value = currentWorkspace;
+
   connectSSE();
   loadGraphs();
   loadTasks();
   setInterval(loadTasks, 10000);
   setInterval(loadGraphs, 30000);
+  setInterval(loadWorkspaces, 60000);
 });
 </script>
 </body>

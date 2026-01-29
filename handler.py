@@ -18,7 +18,7 @@ from claude_task import (
     CLAUDE_BINARY, active_tasks,
     call_claude, execute_claude_task, start_task_async
 )
-from thinking_loop import ThinkingLoop
+from thinking_loop import ThinkingLoop, get_workspace_dir, list_workspaces
 
 # Global thinking loop instance
 thinking_loop = ThinkingLoop()
@@ -42,6 +42,11 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
 
     def _graph_id(self, params):
         return params.get('id', 'default')
+
+    def _workspace_dir(self, params):
+        """Get the workspace directory from params."""
+        workspace = params.get('workspace', 'default')
+        return get_workspace_dir(workspace)
 
     def _json_response(self, code, data):
         self.send_response(code)
@@ -160,7 +165,8 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
         elif path == '/v1/agent/graph':
             try:
                 graph = self._read_body()
-                save_graph_state(graph, graph_id, AGENT_GRAPHS_DIR)
+                workspace_dir = self._workspace_dir(params)
+                save_graph_state(graph, graph_id, workspace_dir)
                 self._json_response(200, {
                     "status": "saved",
                     "node_count": len(graph.get('nodes', [])),
@@ -172,7 +178,8 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
         elif path == '/v1/agent/graph/merge':
             try:
                 new_data = self._read_body()
-                updated_graph = merge_into_graph(new_data, graph_id, AGENT_GRAPHS_DIR)
+                workspace_dir = self._workspace_dir(params)
+                updated_graph = merge_into_graph(new_data, graph_id, workspace_dir)
                 self._json_response(200, {
                     "status": "merged",
                     "node_count": len(updated_graph.get('nodes', [])),
@@ -201,8 +208,30 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                 req = self._read_body()
                 result = thinking_loop.configure(
                     prompt=req.get('prompt'),
-                    interval=req.get('interval')
+                    interval=req.get('interval'),
+                    workspace=req.get('workspace')
                 )
+                self._json_response(200, result)
+            except Exception as e:
+                self._json_response(500, {"error": str(e)})
+
+        elif path == '/v1/workspaces':
+            try:
+                req = self._read_body()
+                workspace_name = req.get('name', '').strip()
+                if not workspace_name:
+                    self._json_response(400, {"error": "Workspace name required"})
+                    return
+                result = thinking_loop.create_workspace(workspace_name)
+                self._json_response(200, result)
+            except Exception as e:
+                self._json_response(500, {"error": str(e)})
+
+        elif path == '/v1/loop/workspace':
+            try:
+                req = self._read_body()
+                workspace = req.get('workspace', 'default')
+                result = thinking_loop.set_workspace(workspace)
                 self._json_response(200, result)
             except Exception as e:
                 self._json_response(500, {"error": str(e)})
@@ -289,11 +318,16 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
             else:
                 self._json_response(200, result)
 
+        elif path == '/v1/workspaces':
+            self._json_response(200, {"workspaces": list_workspaces()})
+
         elif path == '/v1/agent/graphs':
-            self._json_response(200, {"graphs": list_graphs(AGENT_GRAPHS_DIR)})
+            workspace_dir = self._workspace_dir(params)
+            self._json_response(200, {"graphs": list_graphs(workspace_dir)})
 
         elif path == '/v1/agent/graph':
-            self._json_response(200, load_graph_state(graph_id, AGENT_GRAPHS_DIR))
+            workspace_dir = self._workspace_dir(params)
+            self._json_response(200, load_graph_state(graph_id, workspace_dir))
 
         elif path == '/v1/tasks':
             tasks_summary = [{
@@ -390,8 +424,20 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
             self._json_response(200 if deleted else 404, {"deleted": deleted, "id": graph_id})
 
         elif path == '/v1/agent/graph':
-            deleted = delete_graph(graph_id, AGENT_GRAPHS_DIR)
-            self._json_response(200 if deleted else 404, {"deleted": deleted})
+            workspace_dir = self._workspace_dir(params)
+            deleted = delete_graph(graph_id, workspace_dir)
+            self._json_response(200 if deleted else 404, {"deleted": deleted, "workspace": params.get('workspace', 'default')})
+
+        elif path == '/v1/workspaces':
+            workspace_name = params.get('name', '')
+            if not workspace_name:
+                self._json_response(400, {"error": "Workspace name required"})
+                return
+            result = thinking_loop.delete_workspace(workspace_name)
+            if 'error' in result:
+                self._json_response(400, result)
+            else:
+                self._json_response(200, result)
 
         else:
             self.send_response(404)

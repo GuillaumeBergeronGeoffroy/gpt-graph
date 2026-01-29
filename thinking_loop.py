@@ -6,12 +6,49 @@ import threading
 import time
 import uuid
 
-from graphs import AGENT_GRAPHS_DIR, list_graphs
+from graphs import AGENT_GRAPHS_DIR, list_graphs, load_graph_state, save_graph_state, delete_graph, merge_into_graph
 from claude_task import active_tasks, execute_claude_task
 
 LOOP_DIR = os.path.expanduser("~/.gpt-graph")
 LOOP_ACTIONS_FILE = os.path.join(LOOP_DIR, "loop-actions.json")
 LOOP_CONFIG_FILE = os.path.join(LOOP_DIR, "loop-config.json")
+
+
+def get_workspace_dir(workspace='default'):
+    """Get the directory for a workspace."""
+    workspace_dir = os.path.join(AGENT_GRAPHS_DIR, workspace)
+    os.makedirs(workspace_dir, exist_ok=True)
+    return workspace_dir
+
+
+def list_workspaces():
+    """List all available workspaces."""
+    workspaces = []
+    if os.path.exists(AGENT_GRAPHS_DIR):
+        for name in os.listdir(AGENT_GRAPHS_DIR):
+            path = os.path.join(AGENT_GRAPHS_DIR, name)
+            if os.path.isdir(path):
+                graphs = list_graphs(path)
+                workspaces.append({
+                    'id': name,
+                    'graph_count': len(graphs),
+                    'total_nodes': sum(g.get('node_count', 0) for g in graphs)
+                })
+        # Also check for legacy flat files (migrate them to 'default')
+        for name in os.listdir(AGENT_GRAPHS_DIR):
+            path = os.path.join(AGENT_GRAPHS_DIR, name)
+            if os.path.isfile(path) and name.endswith('.json'):
+                # Migrate to default workspace
+                default_dir = get_workspace_dir('default')
+                new_path = os.path.join(default_dir, name)
+                if not os.path.exists(new_path):
+                    os.rename(path, new_path)
+    # Ensure default exists
+    if not any(w['id'] == 'default' for w in workspaces):
+        get_workspace_dir('default')
+        workspaces.insert(0, {'id': 'default', 'graph_count': 0, 'total_nodes': 0})
+    workspaces.sort(key=lambda w: w['id'])
+    return workspaces
 
 
 class ThinkingLoop:
@@ -23,11 +60,14 @@ class ThinkingLoop:
         self.prompt = ""
         self.interval = 0
         self.iteration = 0
+        self.workspace = "default"
         self.current_task_id = None
         self.actions = self._load_actions()
         self.sse_clients = []
         self.sse_lock = threading.Lock()
         self._load_config()
+        # Ensure workspace directory exists
+        get_workspace_dir(self.workspace)
 
     def _load_actions(self):
         if os.path.exists(LOOP_ACTIONS_FILE):
@@ -49,6 +89,7 @@ class ThinkingLoop:
                     cfg = json.load(f)
                     self.prompt = cfg.get('prompt', '')
                     self.interval = cfg.get('interval', 0)
+                    self.workspace = cfg.get('workspace', 'default')
             except Exception:
                 pass
 
@@ -56,8 +97,13 @@ class ThinkingLoop:
         with open(LOOP_CONFIG_FILE, 'w') as f:
             json.dump({
                 'prompt': self.prompt,
-                'interval': self.interval
+                'interval': self.interval,
+                'workspace': self.workspace
             }, f, indent=2)
+
+    def _get_workspace_dir(self):
+        """Get the current workspace directory."""
+        return get_workspace_dir(self.workspace)
 
     def _broadcast_sse(self, event_type, data):
         """Send an SSE event to all connected clients."""
@@ -87,11 +133,12 @@ class ThinkingLoop:
 
     def _build_system_prompt(self):
         """Build the full prompt with graph context and action history."""
-        graphs = list_graphs(AGENT_GRAPHS_DIR)
+        workspace_dir = self._get_workspace_dir()
+        graphs = list_graphs(workspace_dir)
         now = time.strftime('%Y-%m-%d %H:%M:%S')
         today = time.strftime('%A, %B %d, %Y')
 
-        graphs_section = "YOUR GRAPHS (working memory):\n"
+        graphs_section = f"YOUR GRAPHS (workspace: {self.workspace}):\n"
         if graphs:
             for g in graphs:
                 created = time.strftime('%Y-%m-%d', time.localtime(g.get('created_at', 0)))
@@ -120,6 +167,43 @@ CURRENT GOAL:
 DATE: {today} ({now})
 SESSION: iteration {self.iteration}
 
+═══════════════════════════════════════════════════════════════════════════════
+                              ⚠️  CRITICAL  ⚠️
+═══════════════════════════════════════════════════════════════════════════════
+
+ROLE
+You are the orchestrator. You do not do all the work yourself. You spawn sub-agents with specific tasks, ingest their results, and integrate their knowledge into your evolving graph memory.
+
+Your job:
+1. Decide what needs to be done
+2. Decompose into tasks that can be delegated
+3. Spin up sub-agents with clear mandates
+4. Receive and evaluate their outputs
+5. Integrate findings into the larger structure
+6. Identify what emerges from the integration that no single sub-agent could see
+
+You are the locus of synthesis. The sub-agents are the locus of execution.
+
+───────────────────────────────────────────────────────────────────────────────
+MEMORY DISCIPLINE — THIS IS NON-NEGOTIABLE
+───────────────────────────────────────────────────────────────────────────────
+
+Write to the graph constantly. The graph is your external memory. Context is finite and will be lost. What is not in the graph does not persist.
+
+- After every sub-agent completes: ingest results into graph
+- After every insight: commit to graph before continuing
+- After every failed path: annotate in graph immediately
+- After every session: ensure graph reflects current state of understanding
+
+Do not accumulate in context what belongs in structure.
+Do not trust that you will remember.
+Do not defer commits.
+
+The graph is not a record of completed work. It is working memory externalized.
+If you are uncertain whether to write, write.
+
+═══════════════════════════════════════════════════════════════════════════════
+
 WHO YOU ARE:
 - You are a chief-of-staff agent. You plan, prioritize, delegate, and execute.
 - You break down complex objectives into small, concrete tasks — then work through them methodically.
@@ -131,12 +215,12 @@ YOUR WORKSPACE:
 - Graphs are your working memory. They persist across sessions. You wake up fresh each time — graphs are how you remember.
 
 {graphs_section}
-GRAPH API (curl localhost:8765):
-- GET  /v1/agent/graphs           → list your graphs
-- GET  /v1/agent/graph?id=X       → read graph X (full JSON)
-- POST /v1/agent/graph?id=X       → save/overwrite graph X
-- POST /v1/agent/graph/merge?id=X → merge nodes into graph X
-- DELETE /v1/agent/graph?id=X     → delete graph X
+GRAPH API (curl localhost:8765) — workspace: {self.workspace}
+- GET  /v1/agent/graphs?workspace={self.workspace}           → list your graphs
+- GET  /v1/agent/graph?workspace={self.workspace}&id=X       → read graph X
+- POST /v1/agent/graph?workspace={self.workspace}&id=X       → save/overwrite graph X
+- POST /v1/agent/graph/merge?workspace={self.workspace}&id=X → merge nodes into graph X
+- DELETE /v1/agent/graph?workspace={self.workspace}&id=X     → delete graph X
 
 Graph JSON format: {{"title": "...", "description": "...", "nodes": [...], "relationships": [...]}}
 
@@ -182,19 +266,56 @@ GUIDELINES:
         self._broadcast_sse('status', {'running': False, 'iteration': self.iteration})
         return {"status": "stopped"}
 
-    def configure(self, prompt=None, interval=None):
+    def configure(self, prompt=None, interval=None, workspace=None):
         if prompt is not None:
             self.prompt = prompt
         if interval is not None:
             self.interval = interval
+        if workspace is not None:
+            self.workspace = workspace
+            get_workspace_dir(workspace)  # Ensure it exists
         self._save_config()
-        return {"prompt": self.prompt, "interval": self.interval}
+        return {"prompt": self.prompt, "interval": self.interval, "workspace": self.workspace}
+
+    def set_workspace(self, workspace):
+        """Switch to a different workspace."""
+        self.workspace = workspace
+        get_workspace_dir(workspace)  # Ensure it exists
+        self._save_config()
+        self._log_action('workspace_change', f'Switched to workspace: {workspace}')
+        return {"workspace": self.workspace}
+
+    def get_workspaces(self):
+        """List all available workspaces."""
+        return list_workspaces()
+
+    def create_workspace(self, workspace):
+        """Create a new workspace."""
+        get_workspace_dir(workspace)
+        self._log_action('workspace_create', f'Created workspace: {workspace}')
+        return {"workspace": workspace, "created": True}
+
+    def delete_workspace(self, workspace):
+        """Delete a workspace and all its graphs."""
+        import shutil
+        if workspace == 'default':
+            return {"error": "Cannot delete default workspace"}
+        workspace_dir = os.path.join(AGENT_GRAPHS_DIR, workspace)
+        if os.path.exists(workspace_dir):
+            shutil.rmtree(workspace_dir)
+            self._log_action('workspace_delete', f'Deleted workspace: {workspace}')
+            if self.workspace == workspace:
+                self.workspace = 'default'
+                self._save_config()
+            return {"workspace": workspace, "deleted": True}
+        return {"error": "Workspace not found"}
 
     def status(self):
         return {
             'running': self.running,
             'iteration': self.iteration,
             'interval': self.interval,
+            'workspace': self.workspace,
             'current_task_id': self.current_task_id,
             'prompt': self.prompt[:200] if self.prompt else '',
             'action_count': len(self.actions)

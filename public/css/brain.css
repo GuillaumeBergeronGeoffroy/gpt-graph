@@ -50,6 +50,62 @@ h1 {
 .dot.disconnected { background: #f44336; }
 #connection-label { font-size: 11px; color: rgba(255, 255, 255, 0.4); }
 
+/* Workspace Selector */
+.workspace-selector {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 12px;
+  padding-left: 12px;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+}
+#workspace-select {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  color: #e0e0e0;
+  font-size: 11px;
+  padding: 4px 8px;
+  cursor: pointer;
+  min-width: 100px;
+}
+#workspace-select:focus {
+  outline: none;
+  border-color: rgba(156, 39, 176, 0.5);
+}
+#workspace-select option {
+  background: #1a1a24;
+  color: #e0e0e0;
+}
+.ws-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+.ws-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.8);
+}
+.ws-add:hover {
+  background: rgba(76, 175, 80, 0.2);
+  border-color: rgba(76, 175, 80, 0.3);
+  color: #81c784;
+}
+.ws-del:hover {
+  background: rgba(244, 67, 54, 0.2);
+  border-color: rgba(244, 67, 54, 0.3);
+  color: #ef9a9a;
+}
+
 /* Panels */
 #panels {
   display: flex;
@@ -192,6 +248,25 @@ h2 {
 .g-name { flex: 1; color: rgba(255, 255, 255, 0.8); font-weight: 500; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .g-meta { color: rgba(156, 39, 176, 0.6); font-size: 10px; font-family: monospace; flex-shrink: 0; }
 .g-time { color: rgba(255, 255, 255, 0.2); font-size: 10px; flex-shrink: 0; }
+.g-delete {
+  opacity: 0;
+  background: rgba(244, 67, 54, 0.15);
+  border: 1px solid rgba(244, 67, 54, 0.3);
+  color: #ef9a9a;
+  border-radius: 4px;
+  width: 20px;
+  height: 20px;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.graph-item:hover .g-delete { opacity: 1; }
+.g-delete:hover {
+  background: rgba(244, 67, 54, 0.3);
+  color: #f44336;
+}
 
 /* Tasks list */
 #tasks-list {

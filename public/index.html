@@ -155,6 +155,14 @@
             <span id="brain-status-text" class="brain-status stopped">Stopped</span>
             <span class="brain-iter-label">Iteration: <strong id="brain-iteration">0</strong></span>
           </div>
+          <div class="brain-workspace-row">
+            <label>Workspace:</label>
+            <select id="brain-workspace" onchange="switchBrainWorkspace(this.value)">
+              <option value="default">default</option>
+            </select>
+            <button class="brain-ws-btn" onclick="createBrainWorkspace()" title="New workspace">+</button>
+            <button class="brain-ws-btn brain-ws-del" onclick="deleteBrainWorkspace()" title="Delete workspace">&times;</button>
+          </div>
           <textarea id="brain-prompt" placeholder="Enter agent goals... What should the autonomous agent work on?" rows="4"></textarea>
           <div class="brain-config-row">
             <label>Delay between iterations (seconds):
