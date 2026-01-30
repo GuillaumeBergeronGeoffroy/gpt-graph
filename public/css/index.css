@@ -366,6 +366,14 @@
     padding: 16px;
     overflow: hidden;
   }
+  #prompt-container.drag-over {
+    outline: 2px dashed rgba(139, 195, 74, 0.6);
+    outline-offset: -4px;
+    background: linear-gradient(135deg, rgba(50, 60, 50, 0.6), rgba(30, 40, 30, 0.8));
+  }
+  #prompt-container .pending-attachments {
+    margin-bottom: 8px;
+  }
   #prompt-container.loading > :not(.lds-ellipsis):not(#suggest-container) {
     pointer-events: none;
     opacity: 0.5;
@@ -1733,12 +1741,128 @@
     .chat-text em {
       color: rgba(255, 255, 255, 0.7);
     }
+    .chat-input-area {
+      display: flex;
+      flex-direction: column;
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(0, 0, 0, 0.2);
+    }
     .chat-input-container {
       display: flex;
       gap: 10px;
-      padding: 16px 20px;
-      border-top: 1px solid rgba(255, 255, 255, 0.1);
-      background: rgba(0, 0, 0, 0.2);
+      padding: 12px 20px 16px;
+      align-items: flex-end;
+    }
+    .chat-attach {
+      width: 44px;
+      height: 44px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.06);
+      border-radius: 10px;
+      font-size: 18px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      color: rgba(255, 255, 255, 0.5);
+    }
+    .chat-attach:hover {
+      background: rgba(139, 195, 74, 0.15);
+      border-color: rgba(139, 195, 74, 0.4);
+      color: rgba(139, 195, 74, 0.9);
+    }
+    .pending-attachments {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 0 20px;
+    }
+    .pending-attachments:not(:empty) {
+      padding-top: 12px;
+    }
+    .pending-attachment {
+      position: relative;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+    }
+    .pending-attachment.image {
+      width: 60px;
+      height: 60px;
+    }
+    .pending-attachment.image img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .pending-attachment.file {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 6px 10px;
+      background: rgba(255, 255, 255, 0.08);
+      font-size: 11px;
+    }
+    .pending-file-icon {
+      font-size: 14px;
+    }
+    .pending-file-name {
+      max-width: 100px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: rgba(255, 255, 255, 0.7);
+    }
+    .pending-remove {
+      position: absolute;
+      top: 2px;
+      right: 2px;
+      width: 18px;
+      height: 18px;
+      background: rgba(0, 0, 0, 0.7);
+      border: none;
+      border-radius: 50%;
+      color: #fff;
+      font-size: 12px;
+      cursor: pointer;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      line-height: 1;
+    }
+    .pending-attachment:hover .pending-remove {
+      display: flex;
+    }
+    .chat-body.drag-over {
+      outline: 2px dashed rgba(139, 195, 74, 0.6);
+      outline-offset: -4px;
+      background: rgba(139, 195, 74, 0.04);
+    }
+    .chat-attachments {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .chat-attachment.image img {
+      max-width: 200px;
+      max-height: 160px;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      display: block;
+    }
+    .attachment-badge {
+      display: inline-block;
+      padding: 4px 10px;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 6px;
+      font-size: 11px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      color: rgba(255, 255, 255, 0.7);
     }
     #chat-input {
       flex: 1;

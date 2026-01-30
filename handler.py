@@ -1,12 +1,16 @@
 """HTTP request handler with CORS support."""
 
+import base64
 import json
+import mimetypes
 import os
 import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, unquote
+
+ATTACHMENTS_DIR = os.path.expanduser('~/.gpt-graph/attachments')
 
 from graphs import (
     GRAPHS_DIR, AGENT_GRAPHS_DIR,
@@ -299,6 +303,45 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json_response(500, {"error": str(e)})
 
+        elif path == '/v1/upload':
+            try:
+                req = self._read_body()
+                filename = req.get('filename', 'file')
+                data_b64 = req.get('data', '')
+
+                # Sanitize filename
+                safe_name = os.path.basename(filename)
+                unique_name = f"{uuid.uuid4().hex[:8]}_{safe_name}"
+
+                os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
+                dest = os.path.join(ATTACHMENTS_DIR, unique_name)
+
+                file_bytes = base64.b64decode(data_b64)
+                with open(dest, 'wb') as f:
+                    f.write(file_bytes)
+
+                # Determine type from extension
+                ext = os.path.splitext(safe_name)[1].lower()
+                image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp'}
+                pdf_exts = {'.pdf'}
+                if ext in image_exts:
+                    file_type = 'image'
+                elif ext in pdf_exts:
+                    file_type = 'pdf'
+                else:
+                    file_type = 'file'
+
+                self._json_response(200, {
+                    "path": dest,
+                    "filename": safe_name,
+                    "type": file_type,
+                    "size": len(file_bytes),
+                    "url": f"/v1/attachments/{unique_name}"
+                })
+            except Exception as e:
+                print(f"Upload error: {e}")
+                self._json_response(500, {"error": {"message": str(e)}})
+
         else:
             self.send_response(404)
             self.end_headers()
@@ -456,6 +499,21 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                     if self.wfile in _sse_clients:
                         _sse_clients.remove(self.wfile)
             return
+
+        elif path.startswith('/v1/attachments/'):
+            filename = path.split('/v1/attachments/', 1)[1]
+            safe_name = os.path.basename(filename)
+            filepath = os.path.join(ATTACHMENTS_DIR, safe_name)
+            if os.path.isfile(filepath):
+                mime_type = mimetypes.guess_type(filepath)[0] or 'application/octet-stream'
+                self.send_response(200)
+                self.send_header('Content-Type', mime_type)
+                self._set_cors_headers()
+                self.end_headers()
+                with open(filepath, 'rb') as f:
+                    self.wfile.write(f.read())
+            else:
+                self._json_response(404, {"error": "File not found"})
 
         elif path.startswith('/v1/tasks/'):
             task_id = path.split('/')[-1]

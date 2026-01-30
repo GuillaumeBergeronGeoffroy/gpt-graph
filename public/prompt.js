@@ -147,10 +147,69 @@ function toggleLogExpand() {
     expand.title = panel.classList.contains('expanded') ? 'Collapse' : 'Expand';
 }
 
+let promptAttachments = []; // Attachments for main prompt flow
+
+function addPromptAttachment(file) {
+    const MAX_SIZE = 20 * 1024 * 1024;
+    if (file.size > MAX_SIZE) {
+        alert(`File "${file.name}" exceeds 20MB limit.`);
+        return;
+    }
+    uploadAttachment(file).then(meta => {
+        promptAttachments.push(meta);
+        renderPromptAttachments();
+    }).catch(e => {
+        console.error('Upload failed:', e);
+        alert(`Upload failed: ${e.message}`);
+    });
+}
+
+function removePromptAttachment(index) {
+    promptAttachments.splice(index, 1);
+    renderPromptAttachments();
+}
+
+function renderPromptAttachments() {
+    const container = document.getElementById('prompt-pending-attachments');
+    if (!container) return;
+    if (promptAttachments.length === 0) {
+        container.innerHTML = '';
+        return;
+    }
+    container.innerHTML = promptAttachments.map((a, i) => {
+        if (a.type === 'image') {
+            return `<div class="pending-attachment image">
+                <img src="http://localhost:8765${a.url}" alt="${escapeHtml(a.filename)}">
+                <span class="pending-remove" onclick="removePromptAttachment(${i})">&times;</span>
+            </div>`;
+        }
+        return `<div class="pending-attachment file">
+            <span class="pending-file-icon">&#128196;</span>
+            <span class="pending-file-name">${escapeHtml(a.filename)}</span>
+            <span class="pending-remove" onclick="removePromptAttachment(${i})">&times;</span>
+        </div>`;
+    }).join('');
+}
+
+function getPromptAttachmentContext() {
+    if (promptAttachments.length === 0) return '';
+    return '\n\nATTACHED FILES (use the Read tool to access these):\n' +
+        promptAttachments.map(a => {
+            const label = a.type === 'image' ? '[IMAGE]' : a.type === 'pdf' ? '[PDF]' : '[FILE]';
+            return `- ${label} ${a.filename}: ${a.path}`;
+        }).join('\n');
+}
+
+function clearPromptAttachments() {
+    promptAttachments = [];
+    renderPromptAttachments();
+}
+
 function registerPromptListeners() {
     nodePrompt = document.getElementById('text-container');
     const extractBtn = document.getElementById('extract-button');
     const generateBtn = document.getElementById('generate-button');
+    const promptContainer = document.getElementById('prompt-container');
 
     // Enable/disable buttons based on text input
     function updateButtons() {
@@ -170,18 +229,53 @@ function registerPromptListeners() {
 
     nodePrompt.addEventListener('input', updateButtons);
     updateButtons(); // Initial state
+
+    // Drag-and-drop on prompt container
+    if (promptContainer) {
+        promptContainer.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            promptContainer.classList.add('drag-over');
+        });
+        promptContainer.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            promptContainer.classList.remove('drag-over');
+        });
+        promptContainer.addEventListener('drop', (e) => {
+            e.preventDefault();
+            promptContainer.classList.remove('drag-over');
+            for (const file of e.dataTransfer.files) {
+                addPromptAttachment(file);
+            }
+        });
+    }
+
+    // Paste handler on textarea for images
+    if (nodePrompt) {
+        nodePrompt.addEventListener('paste', (e) => {
+            const items = e.clipboardData?.items;
+            if (!items) return;
+            for (const item of items) {
+                if (item.type.startsWith('image/')) {
+                    e.preventDefault();
+                    const file = item.getAsFile();
+                    if (file) addPromptAttachment(file);
+                }
+            }
+        });
+    }
 }
 
 // ============ PROMPTS ============
 
 function getBasePrompt() {
     const userText = getVisibleText(document.getElementById('text-container'));
+    const attachCtx = getPromptAttachmentContext();
     return `Extract a knowledge graph from the text. Output ONLY valid JSON, nothing else.
 
 NODE LABELS: Person, Organization, Place, Event, Process, Technology, Concept, Object, Action
 RELATIONSHIPS: CAUSES, ENABLES, REQUIRES, PART_OF, INSTANCE_OF, CREATED_BY, USES, PRODUCES, LEADS_TO, DEPENDS_ON
 
-TEXT: "${userText}"
+TEXT: "${userText}"${attachCtx}
 
 JSON format: {"nodes":[{"id":1,"labels":["Type"],"properties":{"name":"...","description":"..."}}],"relationships":[{"id":1,"startNodeId":1,"endNodeId":2,"type":"VERB","properties":{}}]}
 
@@ -190,9 +284,10 @@ JSON:`;
 
 function getGeneratePrompt() {
     const userPrompt = getVisibleText(document.getElementById('text-container'));
+    const attachCtx = getPromptAttachmentContext();
     return `You are a research ideation engine exploring design space and generating novel hypotheses. Output ONLY valid JSON.
 
-RESEARCH DIRECTION: "${userPrompt}"
+RESEARCH DIRECTION: "${userPrompt}"${attachCtx}
 
 Your task - BUILD A DESIGN SPACE, not just summarize existing work:
 1. Map foundational concepts that define the space
@@ -698,6 +793,7 @@ function generateGraph() {
             // Clear the input after successful generation
             document.getElementById('text-container').value = '';
             document.getElementById('text-container').dispatchEvent(new Event('input'));
+            clearPromptAttachments();
             unsetLoading();
         })
         .catch(error => {
@@ -726,6 +822,7 @@ function getObject() {
             // Clear the input after successful merge
             document.getElementById('text-container').value = '';
             document.getElementById('text-container').dispatchEvent(new Event('input'));
+            clearPromptAttachments();
             unsetLoading();
         })
         .catch(error => {
@@ -1622,8 +1719,75 @@ function toggleAutoMode() {
 // ============ TALK WITH GRAPH ============
 
 let chatHistory = []; // Stores conversation history
+let pendingAttachments = []; // Queued attachments for next message
 
-function getChatPrompt(userQuestion, includeHistory = true) {
+async function uploadAttachment(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = async () => {
+            try {
+                const base64 = reader.result.split(',')[1];
+                const resp = await fetch('http://localhost:8765/v1/upload', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filename: file.name, data: base64 })
+                });
+                const data = await resp.json();
+                if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+                resolve(data);
+            } catch (e) {
+                reject(e);
+            }
+        };
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+    });
+}
+
+async function addPendingAttachment(file) {
+    const MAX_SIZE = 20 * 1024 * 1024; // 20MB
+    if (file.size > MAX_SIZE) {
+        alert(`File "${file.name}" exceeds 20MB limit.`);
+        return;
+    }
+    try {
+        const meta = await uploadAttachment(file);
+        pendingAttachments.push(meta);
+        renderPendingAttachments();
+    } catch (e) {
+        console.error('Upload failed:', e);
+        alert(`Upload failed: ${e.message}`);
+    }
+}
+
+function removePendingAttachment(index) {
+    pendingAttachments.splice(index, 1);
+    renderPendingAttachments();
+}
+
+function renderPendingAttachments() {
+    const container = document.getElementById('pending-attachments');
+    if (!container) return;
+    if (pendingAttachments.length === 0) {
+        container.innerHTML = '';
+        return;
+    }
+    container.innerHTML = pendingAttachments.map((a, i) => {
+        if (a.type === 'image') {
+            return `<div class="pending-attachment image">
+                <img src="http://localhost:8765${a.url}" alt="${escapeHtml(a.filename)}">
+                <span class="pending-remove" onclick="removePendingAttachment(${i})">&times;</span>
+            </div>`;
+        }
+        return `<div class="pending-attachment file">
+            <span class="pending-file-icon">&#128196;</span>
+            <span class="pending-file-name">${escapeHtml(a.filename)}</span>
+            <span class="pending-remove" onclick="removePendingAttachment(${i})">&times;</span>
+        </div>`;
+    }).join('');
+}
+
+function getChatPrompt(userQuestion, includeHistory = true, attachments = []) {
     const nodes = merged_object.nodes.map(n => ({
         id: n.id,
         name: n.properties?.name || n.name,
@@ -1646,8 +1810,24 @@ function getChatPrompt(userQuestion, includeHistory = true) {
     if (includeHistory && chatHistory.length > 0) {
         historyStr = `\nCONVERSATION HISTORY:
 ===========================================
-${chatHistory.map(msg => `${msg.role.toUpperCase()}: ${msg.content}`).join('\n\n')}
+${chatHistory.map(msg => {
+    let line = `${msg.role.toUpperCase()}: ${msg.content}`;
+    if (msg.attachments && msg.attachments.length > 0) {
+        line += '\n' + msg.attachments.map(a => `[Attached: ${a.filename} (${a.path})]`).join('\n');
+    }
+    return line;
+}).join('\n\n')}
 ===========================================\n`;
+    }
+
+    // Build attachments context
+    let attachmentsStr = '';
+    if (attachments.length > 0) {
+        attachmentsStr = `\n\nATTACHED FILES (use the Read tool to access these):\n` +
+            attachments.map(a => {
+                const label = a.type === 'image' ? '[IMAGE]' : a.type === 'pdf' ? '[PDF]' : '[FILE]';
+                return `- ${label} ${a.filename}: ${a.path}`;
+            }).join('\n');
     }
 
     return `You are an expert knowledge navigator with the ability to execute tasks. The following knowledge graph represents your grounding conceptual framework and memory.
@@ -1670,7 +1850,7 @@ RELATIONSHIPS (${relationships.length}):
 ${relationships.map(r => `- ${r.from} --[${r.type}]--> ${r.to}`).join('\n')}
 ===========================================${historyStr}
 
-USER MESSAGE: "${userQuestion}"
+USER MESSAGE: "${userQuestion}"${attachmentsStr}
 
 TASK EXECUTION CAPABILITY:
 You can delegate complex tasks to Claude Code by including a task block in your response. Use this when the user asks you to:
@@ -1753,11 +1933,13 @@ function addChatMessage(role, content) {
     saveChatHistory();
 }
 
-function sendChatRequest(userQuestion) {
+function sendChatRequest(userQuestion, attachments = []) {
     if (!userQuestion.trim()) return;
 
-    // Add user message to history
-    chatHistory.push({ role: 'user', content: userQuestion });
+    // Add user message to history with attachment metadata
+    const userMsg = { role: 'user', content: userQuestion };
+    if (attachments.length > 0) userMsg.attachments = attachments;
+    chatHistory.push(userMsg);
 
     // Show modal with loading state
     showChatModal(true);
@@ -1767,7 +1949,7 @@ function sendChatRequest(userQuestion) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-            prompt: getChatPrompt(userQuestion),
+            prompt: getChatPrompt(userQuestion, true, attachments),
             model: "claude-opus-4-5-20251101"
         })
     })
@@ -2205,12 +2387,17 @@ function updateTaskStatus(taskId, status, result, metadata = {}) {
 function sendChatMessage() {
     const input = document.getElementById('chat-input');
     const message = input.value.trim();
-    if (!message) return;
+    if (!message && pendingAttachments.length === 0) return;
 
     input.value = '';
 
+    // Capture and clear pending attachments
+    const attachments = [...pendingAttachments];
+    pendingAttachments = [];
+    renderPendingAttachments();
+
     // Route through intent classifier
-    const route = classifyIntent(message);
+    const route = classifyIntent(message || 'Describe these attachments');
 
     switch (route.type) {
         case 'sync':
@@ -2228,29 +2415,29 @@ function sendChatMessage() {
             break;
 
         case 'implement':
-            routeToClaudeCode(route.prompt, 'implement');
+            routeToClaudeCode(route.prompt, 'implement', attachments);
             break;
 
         case 'research':
-            routeToClaudeCode(route.prompt, 'research');
+            routeToClaudeCode(route.prompt, 'research', attachments);
             break;
 
         case 'web':
-            routeToClaudeCode(route.prompt, 'web');
+            routeToClaudeCode(route.prompt, 'web', attachments);
             break;
 
         case 'analyze':
-            routeToClaudeCode(route.prompt, 'analyze');
+            routeToClaudeCode(route.prompt, 'analyze', attachments);
             break;
 
         case 'claude':
             // Generic Claude Code task - let it decide
-            routeToClaudeCode(route.prompt, 'auto');
+            routeToClaudeCode(route.prompt, 'auto', attachments);
             break;
 
         case 'chat':
         default:
-            sendChatRequest(message);
+            sendChatRequest(message, attachments);
             break;
     }
 }
@@ -2477,7 +2664,7 @@ ${jsonInstructions}`;
     }
 }
 
-async function routeToClaudeCode(prompt, mode = 'auto') {
+async function routeToClaudeCode(prompt, mode = 'auto', attachments = []) {
     /**
      * Route a task to Claude Code with mode-specific instructions.
      * Modes: 'auto', 'implement', 'research', 'web', 'analyze'
@@ -2492,8 +2679,11 @@ async function routeToClaudeCode(prompt, mode = 'auto') {
         ground: 'ground'
     };
 
-    // Add user message to chat
-    addChatMessage('user', `/${modeLabels[mode]} ${prompt}`);
+    // Add user message to chat (with attachments)
+    const userMsg = { role: 'user', content: `/${modeLabels[mode]} ${prompt}` };
+    if (attachments.length > 0) userMsg.attachments = attachments;
+    chatHistory.push(userMsg);
+    saveChatHistory();
     showChatModal(true);
 
     // Build graph context — give Claude Code API access instead of a truncated dump
@@ -2564,7 +2754,16 @@ WORKFLOW:
 `;
 
     // Mode-specific prompts
-    const fullPrompt = buildModePrompt(mode, prompt, graphContext);
+    let fullPrompt = buildModePrompt(mode, prompt, graphContext);
+
+    // Append attachment context if any
+    if (attachments.length > 0) {
+        fullPrompt += '\n\nATTACHED FILES (use the Read tool to access these):\n' +
+            attachments.map(a => {
+                const label = a.type === 'image' ? '[IMAGE]' : a.type === 'pdf' ? '[PDF]' : '[FILE]';
+                return `- ${label} ${a.filename}: ${a.path}`;
+            }).join('\n');
+    }
 
     try {
         // Sync current graph to server first
@@ -2935,11 +3134,21 @@ function showChatModal(isLoading = false) {
                 </div>
             </div>`;
     } else {
-        conversationHtml = chatHistory.map((msg, i) => {
+        conversationHtml = chatHistory.map((msg) => {
             if (msg.role === 'user') {
+                let attachHtml = '';
+                if (msg.attachments && msg.attachments.length > 0) {
+                    attachHtml = `<div class="chat-attachments">${msg.attachments.map(a => {
+                        if (a.type === 'image') {
+                            return `<div class="chat-attachment image"><img src="http://localhost:8765${a.url}" alt="${escapeHtml(a.filename)}"></div>`;
+                        }
+                        return `<div class="chat-attachment file"><span class="attachment-badge">${escapeHtml(a.filename)}</span></div>`;
+                    }).join('')}</div>`;
+                }
                 return `
                     <div class="chat-message user">
                         <div class="chat-label">You</div>
+                        ${attachHtml}
                         <div class="chat-text">${escapeHtml(msg.content)}</div>
                     </div>`;
             } else if (msg.role === 'system') {
@@ -2993,9 +3202,14 @@ function showChatModal(isLoading = false) {
             <div class="chat-body" id="chat-body">
                 ${conversationHtml}
             </div>
-            <div class="chat-input-container">
-                <textarea id="chat-input" placeholder="${hasHistory ? 'Continue the conversation...' : 'Ask something about your graph...'}" onkeydown="handleChatKeydown(event)"></textarea>
-                <button class="chat-send" onclick="sendChatMessage()">Send</button>
+            <div class="chat-input-area">
+                <div id="pending-attachments" class="pending-attachments"></div>
+                <div class="chat-input-container">
+                    <button class="chat-attach" onclick="document.getElementById('chat-file-input').click()" title="Attach file">&#128206;</button>
+                    <textarea id="chat-input" placeholder="${hasHistory ? 'Continue the conversation...' : 'Ask something about your graph...'}" onkeydown="handleChatKeydown(event)"></textarea>
+                    <button class="chat-send" onclick="sendChatMessage()">Send</button>
+                    <input type="file" id="chat-file-input" multiple style="display:none">
+                </div>
             </div>
             <div class="chat-footer">
                 <span class="chat-hint">Grounded in ${merged_object?.nodes?.length || 0} concepts · ${chatHistory.length} messages</span>
@@ -3009,9 +3223,58 @@ function showChatModal(isLoading = false) {
     const chatBody = document.getElementById('chat-body');
     chatBody.scrollTop = chatBody.scrollHeight;
 
+    // Re-render pending attachments if any
+    renderPendingAttachments();
+
+    // File input change handler
+    const fileInput = document.getElementById('chat-file-input');
+    if (fileInput) {
+        fileInput.addEventListener('change', (e) => {
+            for (const file of e.target.files) {
+                addPendingAttachment(file);
+            }
+            e.target.value = '';
+        });
+    }
+
+    // Drag-and-drop on chat body
+    if (chatBody) {
+        chatBody.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            chatBody.classList.add('drag-over');
+        });
+        chatBody.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            chatBody.classList.remove('drag-over');
+        });
+        chatBody.addEventListener('drop', (e) => {
+            e.preventDefault();
+            chatBody.classList.remove('drag-over');
+            for (const file of e.dataTransfer.files) {
+                addPendingAttachment(file);
+            }
+        });
+    }
+
+    // Paste handler on textarea for images
+    const chatInput = document.getElementById('chat-input');
+    if (chatInput) {
+        chatInput.addEventListener('paste', (e) => {
+            const items = e.clipboardData?.items;
+            if (!items) return;
+            for (const item of items) {
+                if (item.type.startsWith('image/')) {
+                    e.preventDefault();
+                    const file = item.getAsFile();
+                    if (file) addPendingAttachment(file);
+                }
+            }
+        });
+    }
+
     // Focus input
     if (!isLoading) {
-        document.getElementById('chat-input').focus();
+        document.getElementById('chat-input')?.focus();
     }
 }
 
