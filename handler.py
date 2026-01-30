@@ -15,7 +15,7 @@ from graphs import (
     get_graph_labels, traverse_graph
 )
 from claude_task import (
-    CLAUDE_BINARY, active_tasks,
+    CLAUDE_BINARY, active_tasks, create_task, get_tasks_for_workspace,
     call_claude, execute_claude_task, start_task_async
 )
 from thinking_loop import ThinkingLoop, get_workspace_dir, list_workspaces
@@ -104,18 +104,20 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                 model = request.get('model', 'claude-opus-4-5-20251101')
                 async_mode = request.get('async', True)
                 task_graph_id = request.get('graph_id', graph_id)
+                task_workspace = request.get('workspace', params.get('workspace', 'default'))
 
                 task_id = str(uuid.uuid4())[:8]
-                active_tasks[task_id] = {
+                create_task(task_id, {
                     'id': task_id,
                     'status': 'starting',
                     'prompt': prompt[:200] + '...' if len(prompt) > 200 else prompt,
                     'working_dir': os.path.expanduser(working_dir) if working_dir else os.path.expanduser("~/claude-projects"),
                     'graph_id': task_graph_id,
+                    'workspace': task_workspace,
                     'created_at': time.time(),
                     'last_output': '',
                     'output_lines': 0
-                }
+                })
 
                 print(f"Starting task {task_id} (graph: {task_graph_id}) with prompt length: {len(prompt)}")
 
@@ -167,6 +169,14 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                 graph = self._read_body()
                 workspace_dir = self._workspace_dir(params)
                 save_graph_state(graph, graph_id, workspace_dir)
+                # Broadcast graph update to connected clients
+                thinking_loop._broadcast_sse('graph_update', {
+                    'action': 'save',
+                    'graph_id': graph_id,
+                    'workspace': params.get('workspace', 'default'),
+                    'node_count': len(graph.get('nodes', [])),
+                    'relationship_count': len(graph.get('relationships', []))
+                })
                 self._json_response(200, {
                     "status": "saved",
                     "node_count": len(graph.get('nodes', [])),
@@ -180,6 +190,15 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                 new_data = self._read_body()
                 workspace_dir = self._workspace_dir(params)
                 updated_graph = merge_into_graph(new_data, graph_id, workspace_dir)
+                # Broadcast graph update to connected clients
+                thinking_loop._broadcast_sse('graph_update', {
+                    'action': 'merge',
+                    'graph_id': graph_id,
+                    'workspace': params.get('workspace', 'default'),
+                    'node_count': len(updated_graph.get('nodes', [])),
+                    'relationship_count': len(updated_graph.get('relationships', [])),
+                    'added_nodes': len(new_data.get('nodes', []))
+                })
                 self._json_response(200, {
                     "status": "merged",
                     "node_count": len(updated_graph.get('nodes', [])),
@@ -330,14 +349,22 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
             self._json_response(200, load_graph_state(graph_id, workspace_dir))
 
         elif path == '/v1/tasks':
+            workspace = params.get('workspace')
+            if workspace:
+                tasks = get_tasks_for_workspace(workspace)
+            else:
+                tasks = active_tasks
             tasks_summary = [{
                 'id': t['id'],
                 'status': t['status'],
+                'workspace': t.get('workspace', 'default'),
                 'working_dir': t.get('working_dir'),
                 'output_lines': t.get('output_lines', 0),
                 'created_at': t.get('created_at'),
                 'completed_at': t.get('completed_at')
-            } for t in active_tasks.values()]
+            } for t in tasks.values()]
+            # Sort by created_at descending
+            tasks_summary.sort(key=lambda x: x.get('created_at', 0), reverse=True)
             self._json_response(200, {"tasks": tasks_summary})
 
         elif path == '/v1/loop/status':

@@ -6,8 +6,106 @@ import shutil
 import subprocess
 import threading
 import time
-# Track active tasks
+
+# Task persistence - per workspace
+TASKS_DIR = os.path.expanduser("~/.gpt-graph/tasks")
+os.makedirs(TASKS_DIR, exist_ok=True)
+
+# Track active tasks (flat dict, workspace stored in each task)
 active_tasks = {}  # task_id -> task info
+
+
+def _tasks_file(workspace='default'):
+    """Get the tasks file path for a workspace."""
+    safe_ws = workspace.replace('/', '_').replace('\\', '_').replace('..', '_')
+    return os.path.join(TASKS_DIR, f"{safe_ws}.json")
+
+
+def _load_tasks():
+    """Load tasks from all workspace files on startup."""
+    global active_tasks
+    active_tasks = {}
+
+    # Migrate legacy single file if exists
+    legacy_file = os.path.expanduser("~/.gpt-graph/tasks.json")
+    if os.path.exists(legacy_file):
+        try:
+            with open(legacy_file, 'r') as f:
+                legacy_tasks = json.load(f)
+            # Add workspace field and save to default workspace
+            for task_id, task in legacy_tasks.items():
+                task['workspace'] = task.get('workspace', 'default')
+                active_tasks[task_id] = task
+            _save_tasks()
+            os.unlink(legacy_file)
+            print(f"Migrated {len(legacy_tasks)} tasks from legacy file")
+        except Exception as e:
+            print(f"Failed to migrate legacy tasks: {e}")
+
+    # Load from all workspace files
+    if os.path.exists(TASKS_DIR):
+        for filename in os.listdir(TASKS_DIR):
+            if filename.endswith('.json'):
+                workspace = filename[:-5]
+                filepath = os.path.join(TASKS_DIR, filename)
+                try:
+                    with open(filepath, 'r') as f:
+                        workspace_tasks = json.load(f)
+                    for task_id, task in workspace_tasks.items():
+                        task['workspace'] = workspace
+                        if task.get('status') in ('running', 'starting'):
+                            task['status'] = 'interrupted'
+                        active_tasks[task_id] = task
+                except Exception as e:
+                    print(f"Failed to load tasks from {filepath}: {e}")
+
+    print(f"Loaded {len(active_tasks)} tasks from disk")
+
+
+def _save_tasks():
+    """Save tasks to per-workspace files."""
+    try:
+        # Group tasks by workspace
+        by_workspace = {}
+        for task_id, task in active_tasks.items():
+            ws = task.get('workspace', 'default')
+            if ws not in by_workspace:
+                by_workspace[ws] = {}
+            by_workspace[ws][task_id] = task
+
+        # Save each workspace file (keep last 50 per workspace)
+        for ws, tasks in by_workspace.items():
+            tasks_to_save = dict(sorted(
+                tasks.items(),
+                key=lambda x: x[1].get('created_at', 0),
+                reverse=True
+            )[:50])
+            filepath = _tasks_file(ws)
+            with open(filepath, 'w') as f:
+                json.dump(tasks_to_save, f, indent=2)
+    except Exception as e:
+        print(f"Failed to save tasks: {e}")
+
+
+def get_tasks_for_workspace(workspace='default'):
+    """Get tasks filtered by workspace."""
+    return {
+        tid: task for tid, task in active_tasks.items()
+        if task.get('workspace', 'default') == workspace
+    }
+
+
+# Load tasks on module import
+_load_tasks()
+
+
+def create_task(task_id: str, task_info: dict):
+    """Create a new task and save to disk."""
+    # Ensure workspace is set
+    if 'workspace' not in task_info:
+        task_info['workspace'] = 'default'
+    active_tasks[task_id] = task_info
+    _save_tasks()
 
 
 def find_claude_binary() -> str:
@@ -82,6 +180,7 @@ def execute_claude_task(prompt: str, working_dir: str = None, model: str = "clau
         active_tasks[task_id]['working_dir'] = cwd
         active_tasks[task_id]['log_file'] = log_file
         active_tasks[task_id]['started_at'] = time.time()
+        _save_tasks()
 
     # Write prompt to a temp file to avoid ARG_MAX limits
     prompt_dir = os.path.expanduser("~/claude-projects/.logs")
@@ -247,6 +346,7 @@ def execute_claude_task(prompt: str, working_dir: str = None, model: str = "clau
         active_tasks[task_id]['status'] = 'completed'
         active_tasks[task_id]['completed_at'] = time.time()
         active_tasks[task_id]['files'] = files_created[:50]
+        _save_tasks()
 
     return {
         "response": response,
@@ -265,9 +365,11 @@ def start_task_async(prompt: str, working_dir: str, model: str, task_id: str):
             result = execute_claude_task(prompt, working_dir, model, task_id)
             active_tasks[task_id]['result'] = result
             active_tasks[task_id]['status'] = 'completed'
+            _save_tasks()
         except Exception as e:
             active_tasks[task_id]['status'] = 'failed'
             active_tasks[task_id]['error'] = str(e)
+            _save_tasks()
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()

@@ -57,6 +57,22 @@ function connectBrainSSE() {
     });
   });
 
+  // Refresh graphs immediately when agent updates them
+  brainSSE.addEventListener('graph_update', (e) => {
+    const data = JSON.parse(e.data);
+    console.log('Graph updated:', data);
+    appendBrainAction({
+      type: 'graph_update',
+      detail: `${data.action} graph "${data.graph_id}" (${data.node_count}n/${data.relationship_count}r)`,
+      timestamp: Date.now() / 1000,
+      iteration: 0
+    });
+    // Refresh graphs if it's our workspace
+    if (data.workspace === brainWorkspace) {
+      refreshBrainGraphs();
+    }
+  });
+
   brainSSE.onerror = () => {
     // SSE reconnects automatically, update indicator
     const indicator = document.getElementById('brain-connection');
@@ -224,11 +240,13 @@ async function refreshBrainGraphs() {
     (data.graphs || []).forEach(g => {
       const div = document.createElement('div');
       div.className = 'brain-graph-item';
-      const mod = new Date(g.modified_at * 1000).toLocaleString();
+      const mod = new Date(g.modified_at * 1000).toLocaleTimeString();
       div.innerHTML = `
         <span class="brain-graph-name">${g.title || g.id}</span>
-        <span class="brain-graph-meta">${g.node_count}n / ${g.relationship_count}r</span>
-        <span class="brain-graph-time">${mod}</span>
+        <div class="brain-graph-row">
+          <span class="brain-graph-meta">${g.node_count} nodes · ${g.relationship_count} rels</span>
+          <span class="brain-graph-time">${mod}</span>
+        </div>
         <button class="brain-graph-delete" onclick="deleteBrainGraph('${g.id}', event)" title="Delete">&times;</button>
       `;
       list.appendChild(div);

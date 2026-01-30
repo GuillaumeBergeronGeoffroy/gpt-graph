@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Brain Monitor</title>
+  <title>The Thinking Graph</title>
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <link rel="stylesheet" href="css/brain.css">
 </head>
@@ -11,7 +11,7 @@
   <div id="layout">
     <header>
       <div class="header-left">
-        <h1>Brain Monitor</h1>
+        <h1>The Thinking Graph</h1>
         <span id="status-badge" class="badge stopped">Stopped</span>
         <span id="iteration-badge" class="badge iter">#0</span>
         <div class="workspace-selector">
@@ -115,6 +115,22 @@ function connectSSE() {
     if (e.data) {
       const d = JSON.parse(e.data);
       appendAction({ type: 'error', detail: d.error, timestamp: Date.now() / 1000, iteration: d.iteration || 0 });
+    }
+  });
+
+  // Refresh graphs immediately when agent updates them
+  sse.addEventListener('graph_update', e => {
+    const d = JSON.parse(e.data);
+    console.log('Graph updated:', d);
+    appendAction({
+      type: 'graph_update',
+      detail: `${d.action} graph "${d.graph_id}" (${d.node_count}n/${d.relationship_count}r)`,
+      timestamp: Date.now() / 1000,
+      iteration: 0
+    });
+    // Refresh if it's our workspace
+    if (d.workspace === currentWorkspace) {
+      loadGraphs();
     }
   });
 
@@ -275,11 +291,14 @@ async function loadGraphs() {
       div.onclick = (e) => {
         if (!e.target.classList.contains('g-delete')) viewGraph(g.id);
       };
-      const mod = new Date(g.modified_at * 1000).toLocaleString();
+      const mod = new Date(g.modified_at * 1000).toLocaleTimeString();
+      const modDate = new Date(g.modified_at * 1000).toLocaleDateString();
       div.innerHTML = `
         <span class="g-name">${escHtml(g.title || g.id)}</span>
-        <span class="g-meta">${g.node_count}n / ${g.relationship_count}r</span>
-        <span class="g-time">${mod}</span>
+        <div class="g-row">
+          <span class="g-meta">${g.node_count} nodes · ${g.relationship_count} rels</span>
+          <span class="g-time">${modDate} ${mod}</span>
+        </div>
         <button class="g-delete" onclick="deleteAgentGraph('${escHtml(g.id)}', event)" title="Delete graph">&times;</button>
       `;
       if (g.description) div.title = g.description;
@@ -651,16 +670,44 @@ function showNodePopup(node, event) {
       </div>`;
   }
 
+  // Build custom attributes section
+  const skipKeys = new Set(['id', 'name', 'label', 'labels', 'description', 'properties', 'x', 'y', 'vx', 'vy', 'fx', 'fy', 'index', '_original_id', 'grounding', '_groundingVerdict', '_groundingTests', '_groundingScore', '_groundingSuggestion', '_groundingRecommendation', '_auditedAt']);
+  const allProps = { ...node, ...(node.properties || {}) };
+  const customAttrs = Object.entries(allProps).filter(([k, v]) => !skipKeys.has(k) && v !== null && v !== undefined && v !== '');
+
+  let attrsHtml = '';
+  if (customAttrs.length > 0) {
+    attrsHtml = `<div class="popup-attributes">`;
+    for (const [key, value] of customAttrs) {
+      const displayKey = key.replace(/_/g, ' ').replace(/([A-Z])/g, ' $1').trim();
+      let displayValue = '';
+      if (Array.isArray(value)) {
+        displayValue = `<ul class="attr-list">${value.map(v => `<li>${escHtml(typeof v === 'object' ? JSON.stringify(v) : String(v))}</li>`).join('')}</ul>`;
+      } else if (typeof value === 'object') {
+        displayValue = `<pre class="attr-json">${escHtml(JSON.stringify(value, null, 2))}</pre>`;
+      } else {
+        displayValue = `<span class="attr-value">${escHtml(String(value))}</span>`;
+      }
+      attrsHtml += `<div class="attr-row"><span class="attr-key">${escHtml(displayKey)}</span>${displayValue}</div>`;
+    }
+    attrsHtml += `</div>`;
+  }
+
   const isSynthesis = node.labels?.[0] === 'Synthesis';
+  const nodeType = node.type || node.labels?.[0] || 'Node';
+  const nodeName = node.label || node.name || node.properties?.name || 'Unnamed';
+  const nodeDesc = node.description || node.properties?.description;
+
   const popup = document.createElement('div');
   popup.id = 'node-popup';
   popup.innerHTML = `
     <div class="popup-header ${isSynthesis ? 'synthesis-node' : ''} ${auditVerdict ? 'audited-' + auditVerdict : ''}">
-      <span class="popup-label">${node.labels?.[0] || 'Node'}${isSynthesis ? ' \u2728' : ''}</span>
+      <span class="popup-label">${escHtml(nodeType)}${isSynthesis ? ' \u2728' : ''}</span>
       <span class="popup-close" onclick="hideNodePopup()">\u00D7</span>
     </div>
-    <div class="popup-name">${escHtml(node.properties?.name || 'Unnamed')}</div>
-    <div class="popup-description">${escHtml(node.properties?.description || 'No description')}</div>
+    <div class="popup-name">${escHtml(nodeName)}</div>
+    ${nodeDesc ? `<div class="popup-description">${escHtml(nodeDesc)}</div>` : ''}
+    ${attrsHtml}
     ${auditHtml}
     ${groundingHtml}
     ${connectionsHtml}
@@ -722,10 +769,14 @@ async function loadTasks() {
       div.onclick = () => viewLog(t.id);
       const created = t.created_at ? new Date(t.created_at * 1000).toLocaleTimeString() : '';
       div.innerHTML = `
-        <span class="t-id">${escHtml(t.id)}</span>
-        <span class="t-status">${t.status}</span>
-        <span class="t-lines">${t.output_lines || 0} lines</span>
-        <span class="t-time">${created}</span>
+        <div class="t-row">
+          <span class="t-id">${escHtml(t.id)}</span>
+          <span class="t-status">${t.status.toUpperCase()}</span>
+        </div>
+        <div class="t-row">
+          <span class="t-lines">${t.output_lines || 0} lines</span>
+          <span class="t-time">${created}</span>
+        </div>
       `;
       list.appendChild(div);
     });

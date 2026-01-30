@@ -34,10 +34,29 @@ function renderGraph(neo4jJson, history = false) {
         });
     svg.call(currentZoom);
 
-    // Build links first (needed for counting)
+    // Build node indexes for flexible link resolution
+    const nodeById = {};
+    const nodeByName = {};
+    neo4jJson.nodes.forEach(node => {
+        if (node.id !== undefined) nodeById[node.id] = node;
+        const name = node.name || node.properties?.name || node.label;
+        if (name) nodeByName[name] = node;
+    });
+
+    function resolveNode(ref) {
+        if (ref === undefined || ref === null) return null;
+        // If already a node object with x/y or properties, return it
+        if (typeof ref === 'object' && ref !== null && (ref.properties || ref.x !== undefined)) return ref;
+        // Try by id first, then by name
+        return nodeById[ref] || nodeByName[ref] || null;
+    }
+
+    // Build links - try all known field names
     neo4jJson.relationships.forEach(link => {
-        link.source = neo4jJson.nodes.find(node => node.id === link.startNodeId);
-        link.target = neo4jJson.nodes.find(node => node.id === link.endNodeId);
+        const srcRef = link.source || link.startNodeId || link.startNode || link.from;
+        const tgtRef = link.target || link.endNodeId || link.endNode || link.to;
+        link.source = resolveNode(srcRef);
+        link.target = resolveNode(tgtRef);
     });
 
     // Filter invalid relationships
@@ -354,9 +373,17 @@ function showNodePopup(node, event) {
     // Find all connected nodes
     const connections = [];
     if (merged_object?.relationships) {
+        // Helper to extract resolved source/target id
+        function relSourceId(r) {
+            return r.source?.id ?? r.source ?? r.startNodeId ?? r.startNode ?? r.from;
+        }
+        function relTargetId(r) {
+            return r.target?.id ?? r.target ?? r.endNodeId ?? r.endNode ?? r.to;
+        }
+
         merged_object.relationships.forEach(r => {
-            const sourceId = r.source?.id ?? r.startNodeId;
-            const targetId = r.target?.id ?? r.endNodeId;
+            const sourceId = relSourceId(r);
+            const targetId = relTargetId(r);
             let connectedNode = null;
             let direction = '';
 
@@ -369,10 +396,9 @@ function showNodePopup(node, event) {
             }
 
             if (connectedNode) {
-                // Calculate strength based on how many links the connected node has
                 const linkCount = merged_object.relationships.filter(rel => {
-                    const sId = rel.source?.id ?? rel.startNodeId;
-                    const tId = rel.target?.id ?? rel.endNodeId;
+                    const sId = relSourceId(rel);
+                    const tId = relTargetId(rel);
                     return sId === connectedNode.id || tId === connectedNode.id;
                 }).length;
 
@@ -671,13 +697,20 @@ function batchDelete() {
     merged_object.nodes = merged_object.nodes.filter(n => !nodeIds.includes(n.id));
 
     // Remove relationships connected to deleted nodes
-    const removedRels = merged_object.relationships.filter(
-        r => nodeIds.includes(r.startNodeId) || nodeIds.includes(r.endNodeId)
-    ).length;
+    function relNodeIds(r) {
+        const s = r.source?.id ?? r.source ?? r.startNodeId ?? r.startNode ?? r.from;
+        const t = r.target?.id ?? r.target ?? r.endNodeId ?? r.endNode ?? r.to;
+        return [s, t];
+    }
+    const removedRels = merged_object.relationships.filter(r => {
+        const [s, t] = relNodeIds(r);
+        return nodeIds.includes(s) || nodeIds.includes(t);
+    }).length;
 
-    merged_object.relationships = merged_object.relationships.filter(
-        r => !nodeIds.includes(r.startNodeId) && !nodeIds.includes(r.endNodeId)
-    );
+    merged_object.relationships = merged_object.relationships.filter(r => {
+        const [s, t] = relNodeIds(r);
+        return !nodeIds.includes(s) && !nodeIds.includes(t);
+    });
 
     hideBatchMenu();
     selectedNodes = [];
@@ -876,10 +909,11 @@ function updateGraphCounter(filteredCount = null) {
         nodeCountEl.innerHTML = `<span class="filtered">${filteredCount}</span>/${totalNodes}`;
         // Count relationships between filtered nodes
         const filteredIds = new Set(filteredNodes.map(n => n.id));
-        const filteredRels = merged_object?.relationships?.filter(r =>
-            filteredIds.has(r.source?.id || r.startNodeId) &&
-            filteredIds.has(r.target?.id || r.endNodeId)
-        ).length || 0;
+        const filteredRels = merged_object?.relationships?.filter(r => {
+            const s = r.source?.id ?? r.source ?? r.startNodeId ?? r.startNode ?? r.from;
+            const t = r.target?.id ?? r.target ?? r.endNodeId ?? r.endNode ?? r.to;
+            return filteredIds.has(s) && filteredIds.has(t);
+        }).length || 0;
         relCountEl.innerHTML = `<span class="filtered">${filteredRels}</span>/${totalRels}`;
     } else {
         // Show totals
@@ -1014,8 +1048,8 @@ function updateMinimap() {
     ctx.lineWidth = 0.5;
     if (merged_object.relationships) {
         merged_object.relationships.forEach(r => {
-            const sourceId = r.source?.id ?? r.startNodeId ?? r.source;
-            const targetId = r.target?.id ?? r.endNodeId ?? r.target;
+            const sourceId = r.source?.id ?? r.source ?? r.startNodeId ?? r.startNode ?? r.from;
+            const targetId = r.target?.id ?? r.target ?? r.endNodeId ?? r.endNode ?? r.to;
             const source = typeof r.source === 'object' ? r.source : nodes.find(n => n.id === sourceId);
             const target = typeof r.target === 'object' ? r.target : nodes.find(n => n.id === targetId);
             if (source && target && typeof source.x === 'number' && typeof target.x === 'number') {

@@ -69,22 +69,44 @@ def delete_graph(graph_id, base_dir=None):
     return False
 
 
+def _get_node_key(node):
+    """Get a unique key for a node (id > name > label > properties.name)."""
+    # Prefer explicit id for dedup
+    if node.get('id'):
+        return ('id', str(node['id']))
+    # Then try name
+    name = node.get('name') or node.get('properties', {}).get('name')
+    if name:
+        return ('name', name)
+    # Then try label
+    if node.get('label'):
+        return ('label', node['label'])
+    return ('none', None)
+
+
 def merge_into_graph(new_data, graph_id='default', base_dir=None):
-    """Merge new nodes/relationships into existing graph."""
+    """Merge new nodes/relationships into existing graph. Deduplicates by id, then name, then label."""
     current = load_graph_state(graph_id, base_dir)
 
-    # Get existing node names for dedup
-    existing_names = {n.get('name', n.get('properties', {}).get('name', '')) for n in current.get('nodes', [])}
+    # Build index of existing nodes by their keys
+    existing_keys = set()
+    for n in current.get('nodes', []):
+        key = _get_node_key(n)
+        if key[1]:  # Only add if key has a value
+            existing_keys.add(key)
 
     # Add new nodes that don't already exist
     new_nodes = new_data.get('nodes', [])
     for node in new_nodes:
-        name = node.get('name', node.get('properties', {}).get('name', ''))
-        if name and name not in existing_names:
-            max_id = max([n.get('id', 0) for n in current['nodes']] + [0])
-            node['id'] = max_id + 1
+        key = _get_node_key(node)
+        if key[1] and key not in existing_keys:
+            # Assign numeric id if not present or if id is string
+            if not isinstance(node.get('id'), int):
+                max_id = max([n.get('id', 0) for n in current['nodes'] if isinstance(n.get('id'), int)] + [0])
+                node['_original_id'] = node.get('id')  # Preserve original id
+                node['id'] = max_id + 1
             current['nodes'].append(node)
-            existing_names.add(name)
+            existing_keys.add(key)
 
     # Preserve metadata
     for key in ('title', 'description'):
