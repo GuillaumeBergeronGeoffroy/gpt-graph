@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler
@@ -18,10 +19,53 @@ from claude_task import (
     CLAUDE_BINARY, active_tasks, create_task, get_tasks_for_workspace,
     call_claude, execute_claude_task, start_task_async
 )
-from thinking_loop import ThinkingLoop, get_workspace_dir, list_workspaces
+from thinking_loop import (
+    ThinkingLoop, get_workspace_dir, list_workspaces,
+    create_workspace, delete_workspace
+)
 
-# Global thinking loop instance
-thinking_loop = ThinkingLoop()
+# ── Multi-loop registry ──────────────────────────────────────────────────
+thinking_loops = {}
+_loops_lock = threading.Lock()
+
+# ── Shared SSE broadcast ─────────────────────────────────────────────────
+_sse_clients = []
+_sse_lock = threading.Lock()
+
+
+def broadcast_sse(event_type, data):
+    """Send an SSE event to all connected clients."""
+    msg = f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+    encoded = msg.encode()
+    with _sse_lock:
+        dead = []
+        for client in _sse_clients:
+            try:
+                client.write(encoded)
+                client.flush()
+            except Exception:
+                dead.append(client)
+        for d in dead:
+            _sse_clients.remove(d)
+
+
+def get_loop(workspace='default'):
+    """Get or create a ThinkingLoop for the given workspace."""
+    if workspace not in thinking_loops:
+        with _loops_lock:
+            if workspace not in thinking_loops:
+                thinking_loops[workspace] = ThinkingLoop(
+                    workspace=workspace, broadcast_fn=broadcast_sse
+                )
+    return thinking_loops[workspace]
+
+
+def _all_loop_statuses():
+    """Return status dict for all known loops."""
+    statuses = {}
+    for ws, loop in thinking_loops.items():
+        statuses[ws] = loop.status()
+    return statuses
 
 
 class CORSRequestHandler(BaseHTTPRequestHandler):
@@ -170,7 +214,7 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                 workspace_dir = self._workspace_dir(params)
                 save_graph_state(graph, graph_id, workspace_dir)
                 # Broadcast graph update to connected clients
-                thinking_loop._broadcast_sse('graph_update', {
+                broadcast_sse('graph_update', {
                     'action': 'save',
                     'graph_id': graph_id,
                     'workspace': params.get('workspace', 'default'),
@@ -191,7 +235,7 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                 workspace_dir = self._workspace_dir(params)
                 updated_graph = merge_into_graph(new_data, graph_id, workspace_dir)
                 # Broadcast graph update to connected clients
-                thinking_loop._broadcast_sse('graph_update', {
+                broadcast_sse('graph_update', {
                     'action': 'merge',
                     'graph_id': graph_id,
                     'workspace': params.get('workspace', 'default'),
@@ -210,7 +254,9 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
         elif path == '/v1/loop/start':
             try:
                 req = self._read_body()
-                result = thinking_loop.start(
+                workspace = req.get('workspace', 'default')
+                loop = get_loop(workspace)
+                result = loop.start(
                     prompt=req.get('prompt', ''),
                     interval=req.get('interval', 0)
                 )
@@ -219,16 +265,23 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                 self._json_response(500, {"error": str(e)})
 
         elif path == '/v1/loop/stop':
-            result = thinking_loop.stop()
-            self._json_response(200, result)
+            try:
+                req = self._read_body()
+                workspace = req.get('workspace', 'default')
+                loop = get_loop(workspace)
+                result = loop.stop()
+                self._json_response(200, result)
+            except Exception as e:
+                self._json_response(500, {"error": str(e)})
 
         elif path == '/v1/loop/configure':
             try:
                 req = self._read_body()
-                result = thinking_loop.configure(
+                workspace = req.get('workspace', 'default')
+                loop = get_loop(workspace)
+                result = loop.configure(
                     prompt=req.get('prompt'),
-                    interval=req.get('interval'),
-                    workspace=req.get('workspace')
+                    interval=req.get('interval')
                 )
                 self._json_response(200, result)
             except Exception as e:
@@ -241,16 +294,7 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                 if not workspace_name:
                     self._json_response(400, {"error": "Workspace name required"})
                     return
-                result = thinking_loop.create_workspace(workspace_name)
-                self._json_response(200, result)
-            except Exception as e:
-                self._json_response(500, {"error": str(e)})
-
-        elif path == '/v1/loop/workspace':
-            try:
-                req = self._read_body()
-                workspace = req.get('workspace', 'default')
-                result = thinking_loop.set_workspace(workspace)
+                result = create_workspace(workspace_name)
                 self._json_response(200, result)
             except Exception as e:
                 self._json_response(500, {"error": str(e)})
@@ -368,11 +412,20 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
             self._json_response(200, {"tasks": tasks_summary})
 
         elif path == '/v1/loop/status':
-            self._json_response(200, thinking_loop.status())
+            workspace = params.get('workspace')
+            if workspace:
+                # Single workspace status
+                loop = get_loop(workspace)
+                self._json_response(200, loop.status())
+            else:
+                # All loops status
+                self._json_response(200, {"loops": _all_loop_statuses()})
 
         elif path == '/v1/loop/actions':
+            workspace = params.get('workspace', 'default')
+            loop = get_loop(workspace)
             limit = int(params.get('limit', '50'))
-            self._json_response(200, {"actions": thinking_loop.actions[-limit:]})
+            self._json_response(200, {"actions": loop.actions[-limit:]})
 
         elif path == '/v1/loop/stream':
             self.send_response(200)
@@ -382,12 +435,14 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
             self._set_cors_headers()
             self.end_headers()
 
-            status_msg = f"event: status\ndata: {json.dumps(thinking_loop.status())}\n\n"
-            self.wfile.write(status_msg.encode())
+            # Send initial all_status event with all loop statuses
+            all_status = _all_loop_statuses()
+            init_msg = f"event: all_status\ndata: {json.dumps(all_status)}\n\n"
+            self.wfile.write(init_msg.encode())
             self.wfile.flush()
 
-            with thinking_loop.sse_lock:
-                thinking_loop.sse_clients.append(self.wfile)
+            with _sse_lock:
+                _sse_clients.append(self.wfile)
 
             try:
                 while True:
@@ -397,9 +452,9 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             finally:
-                with thinking_loop.sse_lock:
-                    if self.wfile in thinking_loop.sse_clients:
-                        thinking_loop.sse_clients.remove(self.wfile)
+                with _sse_lock:
+                    if self.wfile in _sse_clients:
+                        _sse_clients.remove(self.wfile)
             return
 
         elif path.startswith('/v1/tasks/'):
@@ -460,7 +515,14 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
             if not workspace_name:
                 self._json_response(400, {"error": "Workspace name required"})
                 return
-            result = thinking_loop.delete_workspace(workspace_name)
+            # Stop the loop if running and remove from registry
+            with _loops_lock:
+                if workspace_name in thinking_loops:
+                    loop = thinking_loops[workspace_name]
+                    if loop.running:
+                        loop.stop()
+                    del thinking_loops[workspace_name]
+            result = delete_workspace(workspace_name)
             if 'error' in result:
                 self._json_response(400, result)
             else:

@@ -50,60 +50,101 @@ h1 {
 .dot.disconnected { background: #f44336; }
 #connection-label { font-size: 11px; color: rgba(255, 255, 255, 0.4); }
 
-/* Workspace Selector */
-.workspace-selector {
+/* Workspace Tabs */
+#workspace-tabs {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   margin-left: 12px;
   padding-left: 12px;
   border-left: 1px solid rgba(255, 255, 255, 0.1);
+  overflow-x: auto;
+  max-width: 500px;
+  scrollbar-width: none;
 }
-#workspace-select {
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 6px;
-  color: #e0e0e0;
+#workspace-tabs::-webkit-scrollbar { display: none; }
+.ws-tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 8px 8px 0 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: none;
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
   font-size: 11px;
-  padding: 4px 8px;
-  cursor: pointer;
-  min-width: 100px;
-}
-#workspace-select:focus {
-  outline: none;
-  border-color: rgba(156, 39, 176, 0.5);
-}
-#workspace-select option {
-  background: #1a1a24;
-  color: #e0e0e0;
-}
-.ws-btn {
-  width: 22px;
-  height: 22px;
-  border-radius: 5px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.05);
   color: rgba(255, 255, 255, 0.5);
-  font-size: 14px;
+  white-space: nowrap;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.ws-tab:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.7);
+}
+.ws-tab.active {
+  background: rgba(156, 39, 176, 0.2);
+  border-color: rgba(156, 39, 176, 0.4);
+  color: #ce93d8;
+}
+.ws-tab-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.15);
+  flex-shrink: 0;
+  transition: all 0.3s;
+}
+.ws-tab-dot.running {
+  background: #4caf50;
+  box-shadow: 0 0 4px rgba(76, 175, 80, 0.6);
+}
+.ws-tab-name {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-tab-close {
+  display: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.3);
+  font-size: 12px;
+  line-height: 1;
   cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: all 0.15s;
+}
+.ws-tab:hover .ws-tab-close { display: flex; align-items: center; justify-content: center; }
+.ws-tab-close:hover {
+  background: rgba(244, 67, 54, 0.2);
+  color: #ef9a9a;
+}
+.ws-tab-add {
   display: flex;
   align-items: center;
   justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px dashed rgba(255, 255, 255, 0.15);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.3);
+  font-size: 14px;
+  cursor: pointer;
+  flex-shrink: 0;
   transition: all 0.15s;
 }
-.ws-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.8);
-}
-.ws-add:hover {
-  background: rgba(76, 175, 80, 0.2);
-  border-color: rgba(76, 175, 80, 0.3);
+.ws-tab-add:hover {
+  border-color: rgba(76, 175, 80, 0.4);
+  background: rgba(76, 175, 80, 0.1);
   color: #81c784;
-}
-.ws-del:hover {
-  background: rgba(244, 67, 54, 0.2);
-  border-color: rgba(244, 67, 54, 0.3);
-  color: #ef9a9a;
 }
 
 /* Panels */

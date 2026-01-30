@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import threading
 import time
 import uuid
@@ -10,8 +11,34 @@ from graphs import AGENT_GRAPHS_DIR, list_graphs, load_graph_state, save_graph_s
 from claude_task import active_tasks, execute_claude_task
 
 LOOP_DIR = os.path.expanduser("~/.gpt-graph")
-LOOP_ACTIONS_FILE = os.path.join(LOOP_DIR, "loop-actions.json")
-LOOP_CONFIG_FILE = os.path.join(LOOP_DIR, "loop-config.json")
+LOOPS_DIR = os.path.join(LOOP_DIR, "loops")
+
+# Legacy file paths (for migration)
+_LEGACY_CONFIG = os.path.join(LOOP_DIR, "loop-config.json")
+_LEGACY_ACTIONS = os.path.join(LOOP_DIR, "loop-actions.json")
+
+
+def _loop_config_file(workspace):
+    return os.path.join(LOOPS_DIR, f"{workspace}-config.json")
+
+
+def _loop_actions_file(workspace):
+    return os.path.join(LOOPS_DIR, f"{workspace}-actions.json")
+
+
+def _migrate_legacy_files():
+    """Migrate legacy flat config/actions files to per-workspace directory."""
+    os.makedirs(LOOPS_DIR, exist_ok=True)
+    default_config = _loop_config_file('default')
+    default_actions = _loop_actions_file('default')
+    if os.path.exists(_LEGACY_CONFIG) and not os.path.exists(default_config):
+        shutil.copy2(_LEGACY_CONFIG, default_config)
+    if os.path.exists(_LEGACY_ACTIONS) and not os.path.exists(default_actions):
+        shutil.copy2(_LEGACY_ACTIONS, default_actions)
+
+
+# Run migration on import
+_migrate_legacy_files()
 
 
 def get_workspace_dir(workspace='default'):
@@ -51,50 +78,78 @@ def list_workspaces():
     return workspaces
 
 
+def create_workspace(name):
+    """Create a new workspace."""
+    get_workspace_dir(name)
+    return {"workspace": name, "created": True}
+
+
+def delete_workspace(name):
+    """Delete a workspace and all its graphs."""
+    if name == 'default':
+        return {"error": "Cannot delete default workspace"}
+    workspace_dir = os.path.join(AGENT_GRAPHS_DIR, name)
+    if os.path.exists(workspace_dir):
+        shutil.rmtree(workspace_dir)
+        # Clean up loop files
+        config_file = _loop_config_file(name)
+        actions_file = _loop_actions_file(name)
+        if os.path.exists(config_file):
+            os.remove(config_file)
+        if os.path.exists(actions_file):
+            os.remove(actions_file)
+        return {"workspace": name, "deleted": True}
+    return {"error": "Workspace not found"}
+
+
 class ThinkingLoop:
     """Persistent autonomous agent that respawns Claude Code sessions in a loop."""
 
-    def __init__(self):
+    def __init__(self, workspace='default', broadcast_fn=None):
+        self.workspace = workspace  # immutable per instance
+        self._broadcast_fn = broadcast_fn
         self.running = False
         self.thread = None
         self.prompt = ""
         self.interval = 0
         self.iteration = 0
-        self.workspace = "default"
         self.current_task_id = None
         self.actions = self._load_actions()
-        self.sse_clients = []
-        self.sse_lock = threading.Lock()
         self._load_config()
         # Ensure workspace directory exists
         get_workspace_dir(self.workspace)
 
     def _load_actions(self):
-        if os.path.exists(LOOP_ACTIONS_FILE):
+        actions_file = _loop_actions_file(self.workspace)
+        if os.path.exists(actions_file):
             try:
-                with open(LOOP_ACTIONS_FILE, 'r') as f:
+                with open(actions_file, 'r') as f:
                     return json.load(f)
             except Exception:
                 pass
         return []
 
     def _save_actions(self):
-        with open(LOOP_ACTIONS_FILE, 'w') as f:
+        os.makedirs(LOOPS_DIR, exist_ok=True)
+        actions_file = _loop_actions_file(self.workspace)
+        with open(actions_file, 'w') as f:
             json.dump(self.actions[-200:], f, indent=2)
 
     def _load_config(self):
-        if os.path.exists(LOOP_CONFIG_FILE):
+        config_file = _loop_config_file(self.workspace)
+        if os.path.exists(config_file):
             try:
-                with open(LOOP_CONFIG_FILE, 'r') as f:
+                with open(config_file, 'r') as f:
                     cfg = json.load(f)
                     self.prompt = cfg.get('prompt', '')
                     self.interval = cfg.get('interval', 0)
-                    self.workspace = cfg.get('workspace', 'default')
             except Exception:
                 pass
 
     def _save_config(self):
-        with open(LOOP_CONFIG_FILE, 'w') as f:
+        os.makedirs(LOOPS_DIR, exist_ok=True)
+        config_file = _loop_config_file(self.workspace)
+        with open(config_file, 'w') as f:
             json.dump({
                 'prompt': self.prompt,
                 'interval': self.interval,
@@ -106,19 +161,10 @@ class ThinkingLoop:
         return get_workspace_dir(self.workspace)
 
     def _broadcast_sse(self, event_type, data):
-        """Send an SSE event to all connected clients."""
-        msg = f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
-        encoded = msg.encode()
-        with self.sse_lock:
-            dead = []
-            for client in self.sse_clients:
-                try:
-                    client.write(encoded)
-                    client.flush()
-                except Exception:
-                    dead.append(client)
-            for d in dead:
-                self.sse_clients.remove(d)
+        """Send an SSE event to all connected clients, injecting workspace."""
+        data['workspace'] = self.workspace
+        if self._broadcast_fn:
+            self._broadcast_fn(event_type, data)
 
     def _log_action(self, action_type, detail):
         entry = {
@@ -316,49 +362,13 @@ GUIDELINES:
         self._broadcast_sse('status', {'running': False, 'iteration': self.iteration})
         return {"status": "stopped"}
 
-    def configure(self, prompt=None, interval=None, workspace=None):
+    def configure(self, prompt=None, interval=None):
         if prompt is not None:
             self.prompt = prompt
         if interval is not None:
             self.interval = interval
-        if workspace is not None:
-            self.workspace = workspace
-            get_workspace_dir(workspace)  # Ensure it exists
         self._save_config()
         return {"prompt": self.prompt, "interval": self.interval, "workspace": self.workspace}
-
-    def set_workspace(self, workspace):
-        """Switch to a different workspace."""
-        self.workspace = workspace
-        get_workspace_dir(workspace)  # Ensure it exists
-        self._save_config()
-        self._log_action('workspace_change', f'Switched to workspace: {workspace}')
-        return {"workspace": self.workspace}
-
-    def get_workspaces(self):
-        """List all available workspaces."""
-        return list_workspaces()
-
-    def create_workspace(self, workspace):
-        """Create a new workspace."""
-        get_workspace_dir(workspace)
-        self._log_action('workspace_create', f'Created workspace: {workspace}')
-        return {"workspace": workspace, "created": True}
-
-    def delete_workspace(self, workspace):
-        """Delete a workspace and all its graphs."""
-        import shutil
-        if workspace == 'default':
-            return {"error": "Cannot delete default workspace"}
-        workspace_dir = os.path.join(AGENT_GRAPHS_DIR, workspace)
-        if os.path.exists(workspace_dir):
-            shutil.rmtree(workspace_dir)
-            self._log_action('workspace_delete', f'Deleted workspace: {workspace}')
-            if self.workspace == workspace:
-                self.workspace = 'default'
-                self._save_config()
-            return {"workspace": workspace, "deleted": True}
-        return {"error": "Workspace not found"}
 
     def status(self):
         return {
@@ -392,6 +402,7 @@ GUIDELINES:
                 'prompt': full_prompt[:200] + '...',
                 'working_dir': None,
                 'graph_id': 'loop',
+                'workspace': self.workspace,
                 'created_at': time.time(),
                 'last_output': '',
                 'output_lines': 0

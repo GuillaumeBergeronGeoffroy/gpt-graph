@@ -167,15 +167,6 @@ async function refreshBrainWorkspaces() {
 
 async function switchBrainWorkspace(workspace) {
   brainWorkspace = workspace;
-  try {
-    await fetch('http://localhost:8765/v1/loop/workspace', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workspace })
-    });
-  } catch (e) {
-    console.error('Failed to switch workspace:', e);
-  }
   await refreshBrainGraphs();
 }
 

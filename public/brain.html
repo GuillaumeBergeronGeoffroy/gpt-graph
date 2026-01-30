@@ -14,13 +14,7 @@
         <h1>The Thinking Graph</h1>
         <span id="status-badge" class="badge stopped">Stopped</span>
         <span id="iteration-badge" class="badge iter">#0</span>
-        <div class="workspace-selector">
-          <select id="workspace-select" onchange="switchWorkspace(this.value)">
-            <option value="default">default</option>
-          </select>
-          <button class="ws-btn ws-add" onclick="createWorkspace()" title="New workspace">+</button>
-          <button class="ws-btn ws-del" onclick="deleteCurrentWorkspace()" title="Delete workspace">&times;</button>
-        </div>
+        <div id="workspace-tabs"></div>
       </div>
       <div class="header-right">
         <span id="connection-dot" class="dot disconnected"></span>
@@ -82,6 +76,8 @@
 <script>
 const API = 'http://localhost:8765';
 let currentWorkspace = 'default';
+let workspaceStatuses = {};  // { workspace: statusObj }
+let workspacePrompts = {};   // { workspace: promptText } — client-side drafts
 let sse = null;
 let currentGraphSim = null; // Track active D3 simulation
 let currentGraphData = null; // Track loaded graph for popup connections
@@ -99,37 +95,71 @@ function connectSSE() {
   if (sse) sse.close();
   sse = new EventSource(`${API}/v1/loop/stream`);
 
-  sse.addEventListener('status', e => updateStatus(JSON.parse(e.data)));
-  sse.addEventListener('action', e => appendAction(JSON.parse(e.data)));
-  sse.addEventListener('iteration_complete', e => {
-    const d = JSON.parse(e.data);
-    appendAction({
-      type: 'iteration_complete',
-      detail: `Iteration ${d.iteration} done (exit ${d.exit_code}, ${d.response_length} chars)`,
-      timestamp: Date.now() / 1000, iteration: d.iteration
+  // Initial all_status event — populates statuses for all known loops
+  sse.addEventListener('all_status', e => {
+    const loops = JSON.parse(e.data);
+    Object.entries(loops).forEach(([ws, status]) => {
+      workspaceStatuses[ws] = status;
     });
-    loadGraphs();
-    loadTasks();
-  });
-  sse.addEventListener('error', e => {
-    if (e.data) {
-      const d = JSON.parse(e.data);
-      appendAction({ type: 'error', detail: d.error, timestamp: Date.now() / 1000, iteration: d.iteration || 0 });
+    renderTabs();
+    // Update current workspace's status display
+    if (workspaceStatuses[currentWorkspace]) {
+      updateStatus(workspaceStatuses[currentWorkspace]);
     }
   });
 
-  // Refresh graphs immediately when agent updates them
+  // Per-workspace status updates
+  sse.addEventListener('status', e => {
+    const data = JSON.parse(e.data);
+    const ws = data.workspace || 'default';
+    workspaceStatuses[ws] = data;
+    updateTabDot(ws, data.running);
+    if (ws === currentWorkspace) {
+      updateStatus(data);
+    }
+  });
+
+  // Actions — only show for current workspace
+  sse.addEventListener('action', e => {
+    const data = JSON.parse(e.data);
+    if (data.workspace === currentWorkspace) {
+      appendAction(data);
+    }
+  });
+
+  sse.addEventListener('iteration_complete', e => {
+    const d = JSON.parse(e.data);
+    if (d.workspace === currentWorkspace) {
+      appendAction({
+        type: 'iteration_complete',
+        detail: `Iteration ${d.iteration} done (exit ${d.exit_code}, ${d.response_length} chars)`,
+        timestamp: Date.now() / 1000, iteration: d.iteration
+      });
+      loadGraphs();
+      loadTasks();
+    }
+  });
+
+  sse.addEventListener('error', e => {
+    if (e.data) {
+      const d = JSON.parse(e.data);
+      if (d.workspace === currentWorkspace) {
+        appendAction({ type: 'error', detail: d.error, timestamp: Date.now() / 1000, iteration: d.iteration || 0 });
+      }
+    }
+  });
+
+  // Refresh graphs only if it's our workspace
   sse.addEventListener('graph_update', e => {
     const d = JSON.parse(e.data);
     console.log('Graph updated:', d);
-    appendAction({
-      type: 'graph_update',
-      detail: `${d.action} graph "${d.graph_id}" (${d.node_count}n/${d.relationship_count}r)`,
-      timestamp: Date.now() / 1000,
-      iteration: 0
-    });
-    // Refresh if it's our workspace
     if (d.workspace === currentWorkspace) {
+      appendAction({
+        type: 'graph_update',
+        detail: `${d.action} graph "${d.graph_id}" (${d.node_count}n/${d.relationship_count}r)`,
+        timestamp: Date.now() / 1000,
+        iteration: 0
+      });
       loadGraphs();
     }
   });
@@ -192,43 +222,127 @@ function escHtml(s) {
   return d.innerHTML;
 }
 
-// ── Workspaces ────────────────────────────────────────────────────────
+// ── Workspace Tabs ────────────────────────────────────────────────────
 async function loadWorkspaces() {
   try {
-    const res = await fetch(`${API}/v1/workspaces`);
-    const data = await res.json();
-    const select = document.getElementById('workspace-select');
-    const currentVal = select.value;
-    select.innerHTML = '';
-    (data.workspaces || []).forEach(ws => {
-      const opt = document.createElement('option');
-      opt.value = ws.id;
-      opt.textContent = `${ws.id} (${ws.graph_count} graphs)`;
-      if (ws.id === currentWorkspace) opt.selected = true;
-      select.appendChild(opt);
-    });
-    // Restore selection if still valid
-    if ([...select.options].some(o => o.value === currentVal)) {
-      select.value = currentVal;
+    const [wsRes, statusRes] = await Promise.all([
+      fetch(`${API}/v1/workspaces`),
+      fetch(`${API}/v1/loop/status`)
+    ]);
+    const wsData = await wsRes.json();
+    const statusData = await statusRes.json();
+
+    // Populate workspaceStatuses from the all-loops response
+    if (statusData.loops) {
+      Object.entries(statusData.loops).forEach(([ws, status]) => {
+        workspaceStatuses[ws] = status;
+      });
     }
+
+    renderTabs(wsData.workspaces || []);
   } catch (e) {
     console.error('Failed to load workspaces:', e);
   }
 }
 
-async function switchWorkspace(workspace) {
-  currentWorkspace = workspace;
-  // Also update the thinking loop's workspace
-  try {
-    await fetch(`${API}/v1/loop/workspace`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workspace })
+function renderTabs(workspaces) {
+  const container = document.getElementById('workspace-tabs');
+  if (!workspaces) {
+    // Re-render with existing tabs if called without args (e.g. from SSE)
+    const existing = container.querySelectorAll('.ws-tab');
+    existing.forEach(tab => {
+      const ws = tab.dataset.workspace;
+      const dot = tab.querySelector('.ws-tab-dot');
+      const status = workspaceStatuses[ws];
+      if (dot) {
+        dot.className = 'ws-tab-dot' + (status && status.running ? ' running' : '');
+      }
+      tab.className = 'ws-tab' + (ws === currentWorkspace ? ' active' : '');
     });
-  } catch (e) {
-    console.error('Failed to switch loop workspace:', e);
+    return;
   }
+
+  container.innerHTML = '';
+
+  workspaces.forEach(ws => {
+    const tab = document.createElement('div');
+    tab.className = 'ws-tab' + (ws.id === currentWorkspace ? ' active' : '');
+    tab.dataset.workspace = ws.id;
+
+    const status = workspaceStatuses[ws.id];
+    const isRunning = status && status.running;
+
+    const dot = document.createElement('span');
+    dot.className = 'ws-tab-dot' + (isRunning ? ' running' : '');
+
+    const name = document.createElement('span');
+    name.className = 'ws-tab-name';
+    name.textContent = ws.id;
+    name.title = `${ws.id} (${ws.graph_count} graphs)`;
+
+    tab.appendChild(dot);
+    tab.appendChild(name);
+
+    // Close button (not for default)
+    if (ws.id !== 'default') {
+      const close = document.createElement('button');
+      close.className = 'ws-tab-close';
+      close.textContent = '\u00D7';
+      close.title = 'Delete workspace';
+      close.onclick = (e) => { e.stopPropagation(); deleteWorkspace(ws.id); };
+      tab.appendChild(close);
+    }
+
+    tab.onclick = () => switchWorkspace(ws.id);
+    container.appendChild(tab);
+  });
+
+  // Add "+" tab
+  const addBtn = document.createElement('button');
+  addBtn.className = 'ws-tab-add';
+  addBtn.textContent = '+';
+  addBtn.title = 'New workspace';
+  addBtn.onclick = () => createWorkspace();
+  container.appendChild(addBtn);
+}
+
+function updateTabDot(workspace, isRunning) {
+  const tab = document.querySelector(`.ws-tab[data-workspace="${workspace}"]`);
+  if (!tab) return;
+  const dot = tab.querySelector('.ws-tab-dot');
+  if (dot) {
+    dot.className = 'ws-tab-dot' + (isRunning ? ' running' : '');
+  }
+}
+
+function switchWorkspace(workspace) {
+  // Save current workspace's prompt draft
+  workspacePrompts[currentWorkspace] = document.getElementById('prompt-input').value;
+
+  currentWorkspace = workspace;
+
+  // Re-highlight active tab
+  document.querySelectorAll('.ws-tab').forEach(tab => {
+    tab.className = 'ws-tab' + (tab.dataset.workspace === workspace ? ' active' : '');
+  });
+
+  // Update status display from cached statuses
+  const status = workspaceStatuses[workspace];
+  if (status) {
+    updateStatus(status);
+  } else {
+    updateStatus({ running: false, iteration: 0 });
+  }
+
+  // Restore workspace's prompt: prefer local draft, then server-saved, then empty
+  const savedPrompt = workspacePrompts[workspace] ?? (status && status.prompt) ?? '';
+  document.getElementById('prompt-input').value = savedPrompt;
+
+  // Clear feed for workspace switch
+  document.getElementById('feed').innerHTML = '';
+
   loadGraphs();
+  loadTasks();
 }
 
 async function createWorkspace() {
@@ -242,8 +356,6 @@ async function createWorkspace() {
     });
     if (res.ok) {
       await loadWorkspaces();
-      // Switch to the new workspace
-      document.getElementById('workspace-select').value = name.trim();
       switchWorkspace(name.trim());
     } else {
       const data = await res.json();
@@ -254,21 +366,25 @@ async function createWorkspace() {
   }
 }
 
-async function deleteCurrentWorkspace() {
-  if (currentWorkspace === 'default') {
+async function deleteWorkspace(name) {
+  if (name === 'default') {
     alert('Cannot delete the default workspace');
     return;
   }
-  if (!confirm(`Delete workspace "${currentWorkspace}" and ALL its graphs? This cannot be undone.`)) return;
+  if (!confirm(`Delete workspace "${name}" and ALL its graphs? This cannot be undone.`)) return;
   try {
-    const res = await fetch(`${API}/v1/workspaces?name=${encodeURIComponent(currentWorkspace)}`, {
+    const res = await fetch(`${API}/v1/workspaces?name=${encodeURIComponent(name)}`, {
       method: 'DELETE'
     });
     if (res.ok) {
-      currentWorkspace = 'default';
+      delete workspaceStatuses[name];
+      if (currentWorkspace === name) {
+        currentWorkspace = 'default';
+      }
       await loadWorkspaces();
-      document.getElementById('workspace-select').value = 'default';
-      loadGraphs();
+      if (currentWorkspace === 'default') {
+        switchWorkspace('default');
+      }
     } else {
       const data = await res.json();
       alert(data.error || 'Failed to delete workspace');
@@ -756,7 +872,7 @@ const LOG_POLL_MS = 3000;
 
 async function loadTasks() {
   try {
-    const res = await fetch(`${API}/v1/tasks`);
+    const res = await fetch(`${API}/v1/tasks?${workspaceParam()}`);
     const data = await res.json();
     const list = document.getElementById('tasks-list');
     list.innerHTML = '';
@@ -842,7 +958,7 @@ async function startLoop() {
   try {
     const res = await fetch(`${API}/v1/loop/start`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, interval })
+      body: JSON.stringify({ prompt, interval, workspace: currentWorkspace })
     });
     const data = await res.json();
     if (data.error) alert(data.error);
@@ -852,31 +968,39 @@ async function startLoop() {
 async function stopLoop() {
   try {
     await fetch(`${API}/v1/loop/stop`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspace: currentWorkspace })
     });
   } catch (e) { alert('Failed: ' + e.message); }
 }
 
 // ── Init ───────────────────────────────────────────────────────────────
 window.addEventListener('load', async () => {
-  // Get current loop status to sync workspace
+  // Fetch all loop statuses
   try {
     const res = await fetch(`${API}/v1/loop/status`);
-    const status = await res.json();
-    if (status.workspace) {
-      currentWorkspace = status.workspace;
+    const data = await res.json();
+    if (data.loops) {
+      Object.entries(data.loops).forEach(([ws, status]) => {
+        workspaceStatuses[ws] = status;
+        if (status.prompt) {
+          workspacePrompts[ws] = status.prompt;
+        }
+      });
     }
-    if (status.prompt) {
-      document.getElementById('prompt-input').value = status.prompt;
+    // Set prompt and status from current workspace's loop
+    const curStatus = workspaceStatuses[currentWorkspace];
+    if (curStatus) {
+      updateStatus(curStatus);
+      if (curStatus.prompt) {
+        document.getElementById('prompt-input').value = curStatus.prompt;
+      }
     }
-    updateStatus(status);
   } catch (e) {
     console.error('Failed to get loop status:', e);
   }
 
   await loadWorkspaces();
-  document.getElementById('workspace-select').value = currentWorkspace;
-
   connectSSE();
   loadGraphs();
   loadTasks();
