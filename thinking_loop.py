@@ -412,7 +412,7 @@ GUIDELINES:
                 result = execute_claude_task(
                     full_prompt,
                     working_dir=None,
-                    model="claude-opus-4-5-20251101",
+                    model="claude-opus-4-6",
                     task_id=task_id
                 )
                 response = result.get('response', '')

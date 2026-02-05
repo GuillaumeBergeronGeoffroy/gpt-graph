@@ -126,7 +126,7 @@ CLAUDE_BINARY = find_claude_binary()
 print(f"Using Claude binary: {CLAUDE_BINARY}")
 
 
-def call_claude(prompt: str, model: str = "claude-opus-4-5-20251101") -> str:
+def call_claude(prompt: str, model: str = "claude-opus-4-6") -> str:
     """Call Claude Code CLI and return the response."""
     print(f"\n{'='*60}")
     print(f"PROMPT ({len(prompt)} chars):")
@@ -155,7 +155,7 @@ def call_claude(prompt: str, model: str = "claude-opus-4-5-20251101") -> str:
     return response
 
 
-def execute_claude_task(prompt: str, working_dir: str = None, model: str = "claude-opus-4-5-20251101", task_id: str = None) -> dict:
+def execute_claude_task(prompt: str, working_dir: str = None, model: str = "claude-opus-4-6", task_id: str = None) -> dict:
     """Execute a Claude Code task that can create files and run commands."""
     if working_dir:
         cwd = os.path.expanduser(working_dir)
