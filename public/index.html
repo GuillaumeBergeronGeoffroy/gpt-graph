@@ -129,6 +129,7 @@
         <div id="download-button" class="buttons" onclick="downloadGraph()">Download</div>
     </div>
     <!-- <div id='server-status' class="setting-prompt">Using local Claude account (run server.py)</div> -->
+    <div id="settings-button" class="buttons" onclick="openSettingsModal()" title="Settings">⚙</div>
     <div id="clear-button" class="buttons" onclick="confirmClearHistory()">Clear</div>
     <div id="brain-button" onclick="openBrainDashboard()">
       Brain <span id="brain-indicator" class="brain-indicator"></span>
@@ -213,9 +214,25 @@
       <div id="graph-list"></div>
     </div>
   </div>
+
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="hidden">
+    <div class="selector-content">
+      <div class="selector-header">
+        <span>Settings</span>
+        <span class="selector-close" onclick="closeSettingsModal()">&times;</span>
+      </div>
+      <div class="settings-body">
+        <label for="model-select">Claude model</label>
+        <select id="model-select"></select>
+        <button class="settings-save-btn" onclick="saveSettings()">Save</button>
+      </div>
+    </div>
+  </div>
   
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <script src="storage.js"></script>
+  <script src="settings.js"></script>
   <script src="prompt.js"></script>
   <script src="renderGraph.js"></script>
   <script src="dragElement.js"></script>

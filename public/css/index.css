@@ -3286,3 +3286,51 @@
     .brain-action-iteration_error, .brain-action-error { border-left: 2px solid rgba(244, 67, 54, 0.5); }
     .brain-action-start { border-left: 2px solid rgba(156, 39, 176, 0.5); }
     .brain-action-stop { border-left: 2px solid rgba(255, 152, 0, 0.5); }
+    #settings-modal {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      z-index: 2000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    #settings-modal.hidden {
+      display: none;
+    }
+    .settings-body {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 20px;
+    }
+    .settings-body label {
+      font-size: 13px;
+      color: rgba(255, 255, 255, 0.7);
+    }
+    .settings-body select {
+      background: rgba(255, 255, 255, 0.08);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 14px;
+    }
+    .settings-save-btn {
+      background: linear-gradient(135deg, rgba(63, 81, 181, 0.9), rgba(103, 58, 183, 0.8));
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 9px 0;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    .settings-save-btn:hover {
+      filter: brightness(1.15);
+    }
