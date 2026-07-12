@@ -796,7 +796,7 @@ function callClaude(prompt) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       prompt: prompt,
-      model: "claude-opus-4-6",
+      model: getSelectedModel(),
     }),
   })
     .then((response) => response.json())
@@ -1008,7 +1008,7 @@ function runDialecticalSynthesis() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       prompt: getDialecticalPrompt(focusNodes),
-      model: "claude-opus-4-6",
+      model: getSelectedModel(),
     }),
   })
     .then((response) => response.json())
@@ -1347,7 +1347,7 @@ function executeSuggestion() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         prompt: getDialecticalPrompt(targetNodes),
-        model: "claude-opus-4-6",
+        model: getSelectedModel(),
       }),
     })
       .then((response) => response.json())
@@ -1516,7 +1516,7 @@ async function runGroundingCheck(targetNodes = null) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           prompt: getGroundingCheckPrompt(batch),
-          model: "claude-opus-4-6",
+          model: getSelectedModel(),
         }),
       });
 
@@ -2087,7 +2087,7 @@ function sendChatRequest(userQuestion, attachments = []) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       prompt: getChatPrompt(userQuestion, true, attachments),
-      model: "claude-opus-4-6",
+      model: getSelectedModel(),
     }),
   })
     .then((response) => response.json())
@@ -2221,7 +2221,7 @@ Every relationship must have: startNodeId, endNodeId, type, properties.`
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       prompt: taskPrompt,
-      model: "claude-opus-4-6",
+      model: getSelectedModel(),
     }),
   })
     .then((response) => response.json())
@@ -2297,7 +2297,7 @@ Begin implementation:`;
     body: JSON.stringify({
       prompt: implementPrompt,
       working_dir: workingDir,
-      model: "claude-opus-4-6",
+      model: getSelectedModel(),
       async: true,
       graph_id: currentGraphId || "default",
     }),
@@ -3922,7 +3922,7 @@ Be thorough - this is about creating a RICHER, more connected knowledge graph, n
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         prompt: mergePrompt,
-        model: "claude-opus-4-6",
+        model: getSelectedModel(),
       }),
     });
 
