@@ -124,9 +124,9 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                     messages = request['messages']
                     prompt = '\n'.join([m.get('content', '') for m in messages])
 
-                model = request.get('model', 'claude-sonnet-4-20250514')
+                model = request.get('model', 'claude-opus-4-8')
                 if 'gpt' in model or 'davinci' in model:
-                    model = 'claude-opus-4-6'
+                    model = 'claude-opus-4-8'
 
                 print(f"Calling Claude with prompt length: {len(prompt)}")
                 response_text = call_claude(prompt, model)
@@ -149,7 +149,7 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                 request = self._read_body()
                 prompt = request.get('prompt', '')
                 working_dir = request.get('working_dir', None)
-                model = request.get('model', 'claude-opus-4-6')
+                model = request.get('model', 'claude-opus-4-8')
                 async_mode = request.get('async', True)
                 task_graph_id = request.get('graph_id', graph_id)
                 task_workspace = request.get('workspace', params.get('workspace', 'default'))
