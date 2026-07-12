@@ -285,7 +285,8 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                 loop = get_loop(workspace)
                 result = loop.configure(
                     prompt=req.get('prompt'),
-                    interval=req.get('interval')
+                    interval=req.get('interval'),
+                    model=req.get('model')
                 )
                 self._json_response(200, result)
             except Exception as e:
