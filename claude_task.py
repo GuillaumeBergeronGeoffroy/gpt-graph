@@ -14,6 +14,49 @@ os.makedirs(TASKS_DIR, exist_ok=True)
 # Track active tasks (flat dict, workspace stored in each task)
 active_tasks = {}  # task_id -> task info
 
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+
+def effort_args(effort):
+    """CLI args for an effort level; none (model default) if unset or unknown."""
+    return ["--effort", effort] if effort in EFFORT_LEVELS else []
+
+
+# Completions answer from the prompt alone: no tools, no MCP servers, no user or project
+# settings (hooks, permission rules), nothing saved as a session, and run from an empty
+# folder so no project CLAUDE.md or memory leaks in. Prompts can carry other agents' text.
+COMPLETION_ARGS = ["--tools", "", "--strict-mcp-config", "--restricted", "--no-session-persistence"]
+COMPLETIONS_DIR = os.path.expanduser("~/.gpt-graph/completions")
+COMPLETION_TIMEOUT = 1800  # Opus at max effort over a whole graph can take a while
+os.makedirs(COMPLETIONS_DIR, exist_ok=True)
+
+
+# Read-only runs may read files and talk to the local graph API, nothing else
+GRAPH_API_CURL = [
+    f'Bash(curl -s {quote}http://localhost:8765/*)' for quote in ('', '"')
+] + [
+    f'Bash(curl -s -X POST {quote}http://localhost:8765/*)' for quote in ('', '"')
+]
+ATTACHMENTS_DIR = os.path.expanduser("~/.gpt-graph/attachments")
+
+
+def permission_args(read_only, readable_dirs=(), graph_writes=True):
+    """CLI permission args. Read-only: no edit tools, user settings ignored, and anything
+    not allowed below is denied without asking. Reads outside cwd need readable_dirs.
+    graph_writes=False also drops POSTs to the graph API, for jobs whose output is reviewed first."""
+    if not read_only:
+        return ["--dangerously-skip-permissions"]
+    curl = GRAPH_API_CURL if graph_writes else [c for c in GRAPH_API_CURL if '-X POST' not in c]
+    args = [
+        "--restricted",
+        "--tools", "Read,Grep,Glob,Bash",
+        "--permission-mode", "dontAsk",
+        "--allowedTools", ",".join(["Read", "Grep", "Glob"] + curl),
+    ]
+    for d in readable_dirs:
+        args += ["--add-dir", d]
+    return args
+
 
 def _tasks_file(workspace='default'):
     """Get the tasks file path for a workspace."""
@@ -126,7 +169,7 @@ CLAUDE_BINARY = find_claude_binary()
 print(f"Using Claude binary: {CLAUDE_BINARY}")
 
 
-def call_claude(prompt: str, model: str = "claude-opus-4-8") -> str:
+def call_claude(prompt: str, model: str = "claude-opus-5-5", effort: str = None) -> str:
     """Call Claude Code CLI and return the response."""
     print(f"\n{'='*60}")
     print(f"PROMPT ({len(prompt)} chars):")
@@ -135,13 +178,16 @@ def call_claude(prompt: str, model: str = "claude-opus-4-8") -> str:
 
     cmd = [
         CLAUDE_BINARY,
-        "-p", prompt,
+        "-p",
         "--model", model,
+        *effort_args(effort),
         "--output-format", "text",
-        "--dangerously-skip-permissions"
+        *COMPLETION_ARGS
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=os.getcwd())
+    # The prompt goes in on stdin: no argument-size limit, and it stays out of `ps`
+    result = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
+                            cwd=COMPLETIONS_DIR, timeout=COMPLETION_TIMEOUT)
 
     if result.returncode != 0:
         print(f"ERROR: {result.stderr}")
@@ -155,13 +201,19 @@ def call_claude(prompt: str, model: str = "claude-opus-4-8") -> str:
     return response
 
 
-def execute_claude_task(prompt: str, working_dir: str = None, model: str = "claude-opus-4-8", task_id: str = None) -> dict:
-    """Execute a Claude Code task that can create files and run commands."""
+def execute_claude_task(prompt: str, working_dir: str = None, model: str = "claude-opus-5-5", task_id: str = None, effort: str = None, read_only: bool = False, graph_writes: bool = True) -> dict:
+    """Execute a Claude Code task. Read-only tasks run inside working_dir and can't modify it."""
     if working_dir:
         cwd = os.path.expanduser(working_dir)
     else:
         cwd = os.path.expanduser("~/claude-projects")
 
+    if read_only:
+        # Never create the directory being analyzed; a file path means its folder
+        if os.path.isfile(cwd):
+            cwd = os.path.dirname(cwd)
+        if not os.path.isdir(cwd):
+            raise FileNotFoundError(f"Codebase path not found: {cwd}")
     os.makedirs(cwd, exist_ok=True)
 
     log_dir = os.path.expanduser("~/claude-projects/.logs")
@@ -198,9 +250,10 @@ def execute_claude_task(prompt: str, working_dir: str = None, model: str = "clau
         CLAUDE_BINARY,
         "-p", bootstrap_prompt,
         "--model", model,
+        *effort_args(effort),
         "--output-format", "stream-json",
         "--verbose",
-        "--dangerously-skip-permissions"
+        *permission_args(read_only, [prompt_dir, ATTACHMENTS_DIR], graph_writes)
     ]
 
     stderr_file = log_file + '.stderr'
@@ -358,11 +411,11 @@ def execute_claude_task(prompt: str, working_dir: str = None, model: str = "clau
     }
 
 
-def start_task_async(prompt: str, working_dir: str, model: str, task_id: str):
-    """Start a task in a background thread."""
+def start_task_async(prompt: str, working_dir: str, model: str, task_id: str, effort: str = None, read_only: bool = False, graph_writes: bool = True, on_done=None):
+    """Start a task in a background thread; on_done(status) runs when it ends."""
     def run():
         try:
-            result = execute_claude_task(prompt, working_dir, model, task_id)
+            result = execute_claude_task(prompt, working_dir, model, task_id, effort, read_only, graph_writes)
             active_tasks[task_id]['result'] = result
             active_tasks[task_id]['status'] = 'completed'
             _save_tasks()
@@ -370,6 +423,9 @@ def start_task_async(prompt: str, working_dir: str, model: str, task_id: str):
             active_tasks[task_id]['status'] = 'failed'
             active_tasks[task_id]['error'] = str(e)
             _save_tasks()
+        finally:
+            if on_done:
+                on_done(active_tasks[task_id]['status'])
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()

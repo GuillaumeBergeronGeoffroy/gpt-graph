@@ -18,6 +18,12 @@
     <div id="graph-counter">
       <span id="node-count">0</span> nodes · <span id="rel-count">0</span> rels
     </div>
+    <div id="activity">
+      <div id="activity-pill" onclick="toggleActivity()" title="Model calls, agent tasks and merges on this graph, from any tab, seat or job">
+        <span class="activity-dot"></span><span id="activity-summary">idle</span>
+      </div>
+      <div id="activity-panel"></div>
+    </div>
     <div id="zoom-controls">
       <button onclick="zoomIn()">+</button>
       <button onclick="zoomOut()">−</button>
@@ -129,7 +135,7 @@
         <div id="download-button" class="buttons" onclick="downloadGraph()">Download</div>
     </div>
     <!-- <div id='server-status' class="setting-prompt">Using local Claude account (run server.py)</div> -->
-    <div id="settings-button" class="buttons" onclick="openSettingsModal()" title="Settings">⚙</div>
+    <div id="settings-button" class="buttons" onclick="openSettingsModal()" title="Settings">⚙ Settings</div>
     <div id="clear-button" class="buttons" onclick="confirmClearHistory()">Clear</div>
     <div id="brain-button" onclick="openBrainDashboard()">
       Brain <span id="brain-indicator" class="brain-indicator"></span>
@@ -225,13 +231,17 @@
       <div class="settings-body">
         <label for="model-select">Claude model</label>
         <select id="model-select"></select>
+        <label for="effort-select">Effort level</label>
+        <select id="effort-select"></select>
         <button class="settings-save-btn" onclick="saveSettings()">Save</button>
       </div>
     </div>
   </div>
   
   <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="graphMerge.js"></script>
   <script src="storage.js"></script>
+  <script src="activity.js"></script>
   <script src="settings.js"></script>
   <script src="prompt.js"></script>
   <script src="renderGraph.js"></script>

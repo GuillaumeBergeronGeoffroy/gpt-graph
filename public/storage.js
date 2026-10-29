@@ -120,35 +120,104 @@ function generateGraphId() {
     return 'graph-' + Date.now() + '-' + Math.random().toString(36).substring(2, 11);
 }
 
+// What the server had when this tab last loaded or saved the current graph. A save sends its
+// updated_at as `base`; if someone else wrote since (a Claude task, a council seat), the server
+// answers 409 and this tab replays its own edits onto the newer copy instead of overwriting it.
+let serverGraphBase = null;
+
+// Saves and pulled-in server changes run one at a time, so neither replays against a base the other moved
+let graphSync = Promise.resolve();
+function serializeGraphSync(task) {
+    const run = graphSync.then(task, task);
+    graphSync = run.catch(() => {});
+    return run;
+}
+
+function rememberServerGraph(id, graph, updatedAt) {
+    serverGraphBase = updatedAt ? { id, updatedAt, ...snapshotGraph(graph) } : null;
+}
+
+async function rebaseOntoServer(id, local) {
+    const response = await fetch(`${SERVER_URL}/v1/graph?id=${encodeURIComponent(id)}`);
+    if (!response.ok) throw new Error(`Server error: ${response.status}`);
+    const serverGraph = await response.json();
+    const rebased = rebaseGraph(serverGraphBase, local, serverGraph);
+    rememberServerGraph(id, serverGraph, serverGraph.updated_at);
+    console.log(`Graph changed on the server; replayed this tab's edits onto it (${rebased.nodes.length} nodes)`);
+    return rebased;
+}
+
 async function saveGraph(graphData = {}, name = null) {
     const id = currentGraphId || generateGraphId();
     currentGraphId = id;
     localStorage.setItem('gestalt-currentGraphId', id);
+    return serializeGraphSync(() => saveGraphNow(id, graphData, name));
+}
 
-    const graph = {
-        nodes: graphData.merged_object?.nodes || merged_object?.nodes || [],
-        relationships: graphData.merged_object?.relationships || merged_object?.relationships || [],
-        title: name || graphData.name || '',
-        // Include history for undo/redo support
-        history: graphData.history || merged_object_history || [],
-        historyIndex: graphData.historyIndex ?? merged_object_history_index ?? 0
-    };
-
+async function saveGraphNow(id, graphData, name) {
     try {
-        const response = await fetch(`${SERVER_URL}/v1/graph?id=${encodeURIComponent(id)}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(graph)
-        });
+        for (let attempt = 0; attempt < 3; attempt++) {
+            const local = graphData.merged_object || merged_object || { nodes: [], relationships: [] };
+            const graph = {
+                nodes: local.nodes || [],
+                relationships: local.relationships || [],
+                title: name || graphData.name || '',
+                // Include history for undo/redo support
+                history: graphData.history || merged_object_history || [],
+                historyIndex: graphData.historyIndex ?? merged_object_history_index ?? 0
+            };
+            const base = serverGraphBase?.id === id ? serverGraphBase : null;
+            const url = `${SERVER_URL}/v1/graph?id=${encodeURIComponent(id)}` + (base ? `&base=${base.updatedAt}` : '');
 
-        if (!response.ok) throw new Error(`Server error: ${response.status}`);
-        const result = await response.json();
-        console.log('Saved graph to server:', id, result);
-        return id;
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(graph)
+            });
+
+            if (response.status === 409 && base) {
+                const rebased = await rebaseOntoServer(id, local);
+                if (graphData.merged_object && graphData.merged_object !== merged_object) {
+                    graphData.merged_object = rebased;
+                } else {
+                    merged_object = rebased;
+                    renderGraph(merged_object);
+                }
+                continue;
+            }
+            if (!response.ok) throw new Error(`Server error: ${response.status}`);
+            const result = await response.json();
+            rememberServerGraph(id, graph, result.updated_at);
+            console.log('Saved graph to server:', id, result);
+            return id;
+        }
+        throw new Error('the graph kept changing on the server; not saved');
     } catch (e) {
         console.error('Failed to save graph:', e.message);
         throw e;
     }
+}
+
+// Pull in writes from other writers (council seats, Claude tasks, other tabs) as they land,
+// keeping this tab's unsaved edits on top
+function watchServerGraphs() {
+    if (typeof EventSource === 'undefined') return;
+    const source = new EventSource(`${SERVER_URL}/v1/loop/stream`);
+    watchActivity(source);
+    source.addEventListener('graph_update', (e) => {
+        const data = JSON.parse(e.data);
+        if (data.scope !== 'client') return;
+        serializeGraphSync(async () => {
+            if (data.graph_id !== currentGraphId || serverGraphBase?.id !== data.graph_id) return;
+            if (data.updated_at <= serverGraphBase.updatedAt) return; // this tab's own write, or already in
+            try {
+                merged_object = await rebaseOntoServer(data.graph_id, merged_object);
+                renderGraph(merged_object);
+            } catch (err) {
+                console.warn('Failed to pull in a server change:', err.message);
+            }
+        });
+    });
 }
 
 async function loadGraph(graphId) {
@@ -162,6 +231,7 @@ async function loadGraph(graphId) {
         const graph = await response.json();
         currentGraphId = graphId;
         localStorage.setItem('gestalt-currentGraphId', graphId);
+        rememberServerGraph(graphId, graph, graph.updated_at);
 
         // Return in the format expected by the app
         return {
@@ -316,6 +386,7 @@ async function initializeStorage() {
         const response = await fetch(`${SERVER_URL}/health`);
         if (!response.ok) throw new Error('Server not healthy');
         console.log('Connected to server');
+        watchServerGraphs();
     } catch (e) {
         console.error('Server not available. Please start server.py');
         return null;
@@ -350,6 +421,7 @@ function triggerAutoSave() {
     if (saveTimeout) clearTimeout(saveTimeout);
 
     saveTimeout = setTimeout(async () => {
+        saveTimeout = null;
         if (merged_object?.nodes?.length > 0) {
             try {
                 await saveGraph({});
@@ -364,7 +436,7 @@ function triggerAutoSave() {
 // ============ CLAUDE CODE TASK EXECUTION ============
 
 async function executeClaudeTask(prompt, options = {}) {
-    const { workingDir, async: asyncMode = true } = options;
+    const { workingDir, async: asyncMode = true, readOnly = false, label = 'agent task' } = options;
 
     // Save current graph first so Claude can see latest state
     if (merged_object?.nodes?.length > 0) {
@@ -378,6 +450,10 @@ async function executeClaudeTask(prompt, options = {}) {
             body: JSON.stringify({
                 prompt: prompt,
                 working_dir: workingDir,
+                model: getSelectedModel(),
+                effort: getSelectedEffort(),
+                ...activityMeta(label),
+                read_only: readOnly,
                 async: asyncMode,
                 graph_id: currentGraphId || 'default'
             })
@@ -419,9 +495,28 @@ async function pollTaskStatus(taskId, { onProgress, onComplete, interval = 2000 
     return poll();
 }
 
+// ============ MERGE ON SERVER ============
+
+// Merge nodes/relationships into the current graph on the server, which dedupes by
+// name and resolves relationship endpoints by id or name. Call reloadGraphFromServer after.
+async function mergeIntoServerGraph(payload) {
+    const gid = currentGraphId || 'default';
+    const response = await fetch(`${SERVER_URL}/v1/graph/merge?id=${encodeURIComponent(gid)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+    if (!response.ok) throw new Error(`Server error: ${response.status}`);
+    return response.json();
+}
+
 // ============ RELOAD FROM SERVER ============
 
 async function reloadGraphFromServer() {
+    return serializeGraphSync(reloadGraphNow);
+}
+
+async function reloadGraphNow() {
     const gid = currentGraphId || 'default';
 
     try {
@@ -431,6 +526,7 @@ async function reloadGraphFromServer() {
         const serverGraph = await response.json();
 
         if (serverGraph?.nodes?.length > 0) {
+            rememberServerGraph(gid, serverGraph, serverGraph.updated_at);
             const oldCount = merged_object?.nodes?.length || 0;
             merged_object = {
                 nodes: serverGraph.nodes,

@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import threading
 import time
 
 # Graph storage directories (separate workspaces)
@@ -38,87 +39,192 @@ def load_graph_state(graph_id='default', base_dir=None):
     return {"nodes": [], "relationships": []}
 
 
-def save_graph_state(state, graph_id='default', base_dir=None):
-    """Save graph state to file."""
-    now = time.time()
-    if 'created_at' not in state:
-        # Preserve existing created_at from disk, or set now
+# One writer at a time: UI saves, Claude task merges and council seats all land here
+_write_lock = threading.RLock()
+
+
+class StaleGraphError(Exception):
+    """A full save was based on an older copy than the one on disk."""
+
+    def __init__(self, updated_at):
+        super().__init__(f"graph changed on the server at {updated_at}")
+        self.updated_at = updated_at
+
+
+def _write_json(path, state):
+    """Write through a temp file and rename it, so no reader ever sees half a graph."""
+    tmp = f"{path}.tmp"
+    with open(tmp, 'w') as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, path)
+
+
+def save_graph_state(state, graph_id='default', base_dir=None, base_updated_at=None):
+    """Save graph state to file.
+
+    With base_updated_at (the updated_at of the copy the caller started from), refuse with
+    StaleGraphError when someone else wrote the graph since, instead of overwriting them.
+    """
+    with _write_lock:
         path = _graph_file(graph_id, base_dir)
+        existing = None
         if os.path.exists(path):
             try:
                 with open(path, 'r') as f:
                     existing = json.load(f)
-                state['created_at'] = existing.get('created_at', now)
             except Exception:
-                state['created_at'] = now
-        else:
-            state['created_at'] = now
-    state['updated_at'] = now
-    path = _graph_file(graph_id, base_dir)
-    with open(path, 'w') as f:
-        json.dump(state, f, indent=2)
-    return state
+                existing = None
+        if base_updated_at is not None and existing and existing.get('updated_at', 0) > base_updated_at:
+            raise StaleGraphError(existing['updated_at'])
+        now = time.time()
+        if 'created_at' not in state:
+            # Preserve existing created_at from disk, or set now
+            state['created_at'] = (existing or {}).get('created_at', now)
+        state['updated_at'] = now
+        _write_json(path, state)
+        return state
 
 
 def delete_graph(graph_id, base_dir=None):
     """Delete a graph file."""
     path = _graph_file(graph_id, base_dir)
-    if os.path.exists(path):
-        os.unlink(path)
-        return True
+    with _write_lock:
+        if os.path.exists(path):
+            os.unlink(path)
+            return True
     return False
 
 
-def _get_node_key(node):
-    """Get a unique key for a node (id > name > label > properties.name)."""
-    # Prefer explicit id for dedup
-    if node.get('id'):
-        return ('id', str(node['id']))
-    # Then try name
-    name = node.get('name') or node.get('properties', {}).get('name')
-    if name:
-        return ('name', name)
-    # Then try label
-    if node.get('label'):
-        return ('label', node['label'])
-    return ('none', None)
+# Field names a relationship endpoint may arrive under (stored, agent-written, or rendered by D3)
+_START_KEYS = ('startNodeId', 'from', 'source', 'startNode')
+_END_KEYS = ('endNodeId', 'to', 'target', 'endNode')
+_REL_FIELDS = {'id', 'type', 'properties', *_START_KEYS, *_END_KEYS}
+_NODE_FIELDS = {'id', 'labels', 'label', 'type', 'name', 'properties'}
+
+
+def _node_name(node):
+    return node.get('name') or (node.get('properties') or {}).get('name') or node.get('label')
+
+
+def _endpoint(rel, keys):
+    """First endpoint reference present: an id, a node name, or a rendered node object."""
+    for key in keys:
+        ref = rel.get(key)
+        if ref is not None:
+            return ref.get('id') if isinstance(ref, dict) else ref
+    return None
 
 
 def merge_into_graph(new_data, graph_id='default', base_dir=None):
-    """Merge new nodes/relationships into existing graph. Deduplicates by id, then name, then label."""
+    """Merge nodes/relationships into a graph. Returns (graph, stats).
+
+    Nodes are deduplicated by name (case-insensitive): merging a name that already exists
+    updates that node's properties. Incoming node ids are local to the payload; new nodes
+    always get a fresh numeric id and relationships are remapped to match. Relationship
+    endpoints may be payload ids, existing graph ids, or node names. Relationships whose
+    endpoints don't resolve are skipped and reported in stats.
+    """
+    with _write_lock:
+        return _merge_unlocked(new_data, graph_id, base_dir)
+
+
+def _merge_unlocked(new_data, graph_id, base_dir):
     current = load_graph_state(graph_id, base_dir)
+    nodes = current.setdefault('nodes', [])
+    relationships = current.setdefault('relationships', [])
+    stats = {'added_nodes': 0, 'updated_nodes': 0, 'added_relationships': 0, 'updated_relationships': 0,
+             'skipped_relationships': []}
 
-    # Build index of existing nodes by their keys
-    existing_keys = set()
-    for n in current.get('nodes', []):
-        key = _get_node_key(n)
-        if key[1]:  # Only add if key has a value
-            existing_keys.add(key)
+    by_name = {}
+    for n in nodes:
+        name = _node_name(n)
+        if name:
+            by_name.setdefault(name.lower(), n)
+    existing_ids = {n.get('id') for n in nodes}
+    next_id = max([n['id'] for n in nodes if isinstance(n.get('id'), int)] + [0]) + 1
+    payload_ids = {}  # str(incoming id) -> stored id
 
-    # Add new nodes that don't already exist
-    new_nodes = new_data.get('nodes', [])
-    for node in new_nodes:
-        key = _get_node_key(node)
-        if key[1] and key not in existing_keys:
-            # Assign numeric id if not present or if id is string
-            if not isinstance(node.get('id'), int):
-                max_id = max([n.get('id', 0) for n in current['nodes'] if isinstance(n.get('id'), int)] + [0])
-                node['_original_id'] = node.get('id')  # Preserve original id
-                node['id'] = max_id + 1
-            current['nodes'].append(node)
-            existing_keys.add(key)
+    for incoming in new_data.get('nodes', []):
+        name = _node_name(incoming)
+        if not name:
+            continue
+        # Top-level extras (description, evidence, ...) become properties
+        extra = {k: v for k, v in incoming.items() if k not in _NODE_FIELDS}
+        props = {**extra, **(incoming.get('properties') or {}), 'name': name}
+
+        stored = by_name.get(name.lower())
+        if stored:
+            stored.setdefault('properties', {}).update(
+                {k: v for k, v in props.items() if k != 'name' and v not in (None, '')})
+            stats['updated_nodes'] += 1
+        else:
+            stored = {
+                'id': next_id,
+                'labels': incoming.get('labels') or [incoming.get('type') or 'Concept'],
+                'properties': props,
+            }
+            if incoming.get('id') is not None:
+                stored['_original_id'] = incoming['id']
+            next_id += 1
+            nodes.append(stored)
+            by_name[name.lower()] = stored
+            stats['added_nodes'] += 1
+
+        if incoming.get('id') is not None:
+            payload_ids[str(incoming['id'])] = stored['id']
+
+    def resolve(ref):
+        # Payload ids shadow graph ids, so a colliding id means the payload's node
+        if ref is None:
+            return None
+        if str(ref) in payload_ids:
+            return payload_ids[str(ref)]
+        if isinstance(ref, str) and ref.lower() in by_name:
+            return by_name[ref.lower()]['id']
+        return ref if ref in existing_ids else None
+
+    seen = {(_endpoint(r, _START_KEYS), _endpoint(r, _END_KEYS), r.get('type')): r for r in relationships}
+    next_rel_id = max([r['id'] for r in relationships if isinstance(r.get('id'), int)] + [0]) + 1
+
+    for rel in new_data.get('relationships', []):
+        start = resolve(_endpoint(rel, _START_KEYS))
+        end = resolve(_endpoint(rel, _END_KEYS))
+        rel_type = rel.get('type') or 'RELATES_TO'
+        if start is None or end is None:
+            stats['skipped_relationships'].append(
+                {k: v for k, v in rel.items() if k in _START_KEYS + _END_KEYS + ('type',)})
+            continue
+        extra = {k: v for k, v in rel.items() if k not in _REL_FIELDS}
+        props = {**(rel.get('properties') or {}), **extra}
+        existing = seen.get((start, end, rel_type))
+        if existing is not None:
+            # The same edge again: its properties update (evidence moved, removed_in, ...)
+            if props:
+                existing.setdefault('properties', {}).update(props)
+                stats['updated_relationships'] += 1
+            continue
+        added = {
+            'id': next_rel_id,
+            'startNodeId': start,
+            'endNodeId': end,
+            'type': rel_type,
+            'properties': props,
+        }
+        relationships.append(added)
+        seen[(start, end, rel_type)] = added
+        next_rel_id += 1
+        stats['added_relationships'] += 1
 
     # Preserve metadata
     for key in ('title', 'description'):
         if key in new_data:
             current[key] = new_data[key]
-
-    # Add new relationships
-    new_rels = new_data.get('relationships', [])
-    current['relationships'] = current.get('relationships', []) + new_rels
+    # Graph-level facts, e.g. the commit the graph describes (analyzed_commit)
+    if isinstance(new_data.get('meta'), dict):
+        current.setdefault('meta', {}).update(new_data['meta'])
 
     save_graph_state(current, graph_id, base_dir)
-    return current
+    return current, stats
 
 
 def list_graphs(base_dir=None):

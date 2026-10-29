@@ -484,7 +484,12 @@ Output as JSON:
     "success_signal": "What would indicate this works"
   },
   "newConcepts": [
-    {"name": "...", "description": "...", "type": "hypothesis|mechanism|experiment|failure_mode"}
+    {
+      "name": "...",
+      "description": "...",
+      "kind": "hypothesis|mechanism|experiment|failure_mode",
+      "targets": [{"name": "Existing Concept", "relation": "PROPOSES_CHANGE_TO"}]
+    }
   ]
 }
 
@@ -497,7 +502,13 @@ For each newConcept include:
 - "hypothesis": the testable claim (if applicable)
 - "mechanism": how it would work
 - "detection": how to measure success/failure
-- "connectsTo": existing concept it relates to
+- "targets": what this concept acts on, each with a directed relation (from this concept to the target):
+    PROPOSES_CHANGE_TO - modifies an existing component or assumption
+    EXTENDS - adds a capability on top of it
+    REPLACES - supersedes it
+    TESTS - an experiment that tests a hypothesis or component
+    MITIGATES - addresses a failure mode or risk
+  Target names must come from the knowledge graph above or from your other newConcepts.
 
 For established/emerging concepts: include "reference" (paper/technique it builds on)
 For speculative concepts: include "rationale" (why this creative leap is worth exploring)
@@ -681,7 +692,9 @@ function mergeNewNodes(newGraph, focusNodeId = null, action = "merge") {
 
     // Check if "connectsTo" references existing nodes (can be comma-separated)
     if (node.properties.connectsTo) {
-      const connectNames = node.properties.connectsTo
+      const connectNames = []
+        .concat(node.properties.connectsTo)
+        .join(",")
         .split(",")
         .map((s) => s.trim().toLowerCase());
       connectNames.forEach((connectName, j) => {
@@ -709,10 +722,19 @@ function mergeNewNodes(newGraph, focusNodeId = null, action = "merge") {
     });
   });
 
+  // Relationships may reference nodes by name ({from, to}) instead of id
+  const idByName = (name) =>
+    merged_object.nodes.find(
+      (n) => n.properties.name?.toLowerCase() === String(name).toLowerCase(),
+    )?.id;
+
   // Add new relationships with remapped IDs
-  (newGraph.relationships || []).forEach((rel, i) => {
-    const sourceId = idMap[rel.startNodeId] ?? rel.startNodeId;
-    const targetId = idMap[rel.endNodeId] ?? rel.endNodeId;
+  (newGraph.relationships || []).forEach((relData, i) => {
+    const { from, to, ...rel } = relData;
+    const sourceId =
+      from !== undefined ? idByName(from) : (idMap[rel.startNodeId] ?? rel.startNodeId);
+    const targetId =
+      to !== undefined ? idByName(to) : (idMap[rel.endNodeId] ?? rel.endNodeId);
 
     // Only add if both nodes exist
     const sourceExists = merged_object.nodes.some((n) => n.id === sourceId);
@@ -790,13 +812,15 @@ function getVisibleText(node) {
 
 // ============ API CALLS ============
 
-function callClaude(prompt) {
+function callClaude(prompt, label = "model call") {
   return fetch("http://localhost:8765/v1/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       prompt: prompt,
       model: getSelectedModel(),
+      effort: getSelectedEffort(),
+      ...activityMeta(label),
     }),
   })
     .then((response) => response.json())
@@ -812,7 +836,7 @@ function generateGraph() {
   logToPanel("action", "Generate Graph", { input: inputText });
 
   setLoading();
-  callClaude(getGeneratePrompt())
+  callClaude(getGeneratePrompt(), "generate graph")
     .then((graph) => {
       if (!merged_object) {
         merged_object = graph;
@@ -844,7 +868,7 @@ function getObject() {
   logToPanel("action", "Merge Text", { input: inputText });
 
   setLoading();
-  callClaude(getBasePrompt())
+  callClaude(getBasePrompt(), "extract graph from text")
     .then((graph) => {
       if (!merged_object) {
         merged_object = graph;
@@ -889,7 +913,7 @@ function researchGraph() {
   });
 
   setLoading();
-  callClaude(getResearchPrompt(focusNodes))
+  callClaude(getResearchPrompt(focusNodes), "research")
     .then((newGraph) => {
       mergeNewNodes(newGraph, null, "research");
       renderGraph(merged_object);
@@ -911,7 +935,7 @@ function researchFromNode(nodeId) {
   hideNodePopup();
   setLoading();
 
-  callClaude(getNodeResearchPrompt(node))
+  callClaude(getNodeResearchPrompt(node), `research: ${node.properties.name}`)
     .then((newGraph) => {
       mergeNewNodes(newGraph, nodeId, "research-node");
       renderGraph(merged_object);
@@ -937,7 +961,7 @@ function expandNode(nodeId) {
   hideNodePopup();
   setLoading();
 
-  callClaude(getExpandNodePrompt(node, existingNames))
+  callClaude(getExpandNodePrompt(node, existingNames), `expand: ${node.properties.name}`)
     .then((newGraph) => {
       mergeNewNodes(newGraph, nodeId, "expand");
       renderGraph(merged_object);
@@ -1009,6 +1033,8 @@ function runDialecticalSynthesis() {
     body: JSON.stringify({
       prompt: getDialecticalPrompt(focusNodes),
       model: getSelectedModel(),
+      effort: getSelectedEffort(),
+      ...activityMeta("dialectical synthesis"),
     }),
   })
     .then((response) => response.json())
@@ -1026,20 +1052,32 @@ function runDialecticalSynthesis() {
 
       // Add new concepts to graph if any
       if (synthesis.newConcepts && synthesis.newConcepts.length > 0) {
+        // Proposals keep their research contract and point at what they would change
+        const contractFields = ["grounding", "hypothesis", "mechanism", "detection", "rationale", "testable", "reference"];
         const newGraph = {
           nodes: synthesis.newConcepts.map((c, i) => ({
-            id: 1000 + i,
-            labels: ["Synthesis"],
+            id: `proposal-${i}`,
+            labels: ["Proposal"],
             properties: {
               name: c.name,
               description: c.description,
-              connectsTo: c.connectsTo,
+              kind: c.kind || c.type,
+              status: "proposed",
+              ...Object.fromEntries(contractFields.filter((f) => c[f]).map((f) => [f, c[f]])),
+              connectsTo: c.targets ? undefined : c.connectsTo,
             },
           })),
-          relationships: [],
+          relationships: synthesis.newConcepts.flatMap((c) =>
+            (c.targets || []).map((t) => ({
+              from: c.name,
+              to: t.name,
+              type: t.relation || "PROPOSES_CHANGE_TO",
+            })),
+          ),
         };
         mergeNewNodes(newGraph, null, "synthesis");
         renderGraph(merged_object);
+        triggerAutoSave();
         clearSearch?.(); // Clear search after operation
       }
 
@@ -1231,7 +1269,7 @@ function suggestNextAction() {
 
   setLoading();
 
-  callClaude(getSuggestPrompt())
+  callClaude(getSuggestPrompt(), "suggest next action")
     .then((response) => {
       // Parse the suggestion
       let text =
@@ -1329,7 +1367,7 @@ function executeSuggestion() {
   if (suggestion.action === "expand") {
     // Use batch expand with the target nodes
     const prompt = getBatchExpandPrompt(targetNodes);
-    callClaude(prompt)
+    callClaude(prompt, "suggested expand")
       .then((newGraph) => {
         mergeNewNodes(newGraph, null, "ai-expand");
         renderGraph(merged_object);
@@ -1348,6 +1386,8 @@ function executeSuggestion() {
       body: JSON.stringify({
         prompt: getDialecticalPrompt(targetNodes),
         model: getSelectedModel(),
+        effort: getSelectedEffort(),
+        ...activityMeta("suggested synthesis"),
       }),
     })
       .then((response) => response.json())
@@ -1517,6 +1557,8 @@ async function runGroundingCheck(targetNodes = null) {
         body: JSON.stringify({
           prompt: getGroundingCheckPrompt(batch),
           model: getSelectedModel(),
+          effort: getSelectedEffort(),
+          ...activityMeta("grounding check"),
         }),
       });
 
@@ -2088,6 +2130,8 @@ function sendChatRequest(userQuestion, attachments = []) {
     body: JSON.stringify({
       prompt: getChatPrompt(userQuestion, true, attachments),
       model: getSelectedModel(),
+      effort: getSelectedEffort(),
+      ...activityMeta(`chat: ${userQuestion}`),
     }),
   })
     .then((response) => response.json())
@@ -2222,6 +2266,8 @@ Every relationship must have: startNodeId, endNodeId, type, properties.`
     body: JSON.stringify({
       prompt: taskPrompt,
       model: getSelectedModel(),
+      effort: getSelectedEffort(),
+      ...activityMeta(`research task: ${task.prompt}`),
     }),
   })
     .then((response) => response.json())
@@ -2298,6 +2344,8 @@ Begin implementation:`;
       prompt: implementPrompt,
       working_dir: workingDir,
       model: getSelectedModel(),
+      effort: getSelectedEffort(),
+      ...activityMeta(`implement: ${projectName}`),
       async: true,
       graph_id: currentGraphId || "default",
     }),
@@ -2752,6 +2800,8 @@ Return a JSON response:
 }
 If no graph updates needed: {"summary": "your response", "nodes": [], "relationships": []}`;
 
+  const readOnlyNote = `You are running READ-ONLY. Read, Grep and Glob work on the codebase. Bash is limited to curl against the graph API, written exactly as curl -s "http://localhost:8765/..." or curl -s -X POST "http://localhost:8765/...". Anything else is denied, so don't try to run, build or edit anything.`;
+
   switch (mode) {
     case "implement":
       return `You are a senior developer implementing features guided by a knowledge graph.
@@ -2808,23 +2858,51 @@ ${jsonInstructions}
 Prioritize recent, authoritative sources.`;
 
     case "analyze":
-      return `You are analyzing a codebase to extract knowledge for a graph.
+      return `You are mapping a codebase's architecture into a knowledge graph so it can be reasoned about and extended.
 
 ${graphContext}
 
 USER REQUEST: ${userPrompt}
 
-INSTRUCTIONS:
-1. Read the graph summary first (curl http://localhost:8765/v1/graph/summary) to see what's already mapped
-2. Read and analyze the specified files/codebase
-3. Identify architectural patterns, key mechanisms, and design decisions
-4. Map findings to existing graph concepts where possible
-5. DO NOT modify any source files - this is READ-ONLY analysis
-6. Merge discovered concepts into the graph via POST http://localhost:8765/v1/graph/merge
-7. Also return findings as JSON:
-${jsonInstructions}
+${readOnlyNote}
 
-Focus on extracting transferable patterns and concepts.`;
+INSTRUCTIONS:
+1. Read the graph summary first to see what's already mapped
+2. Read the codebase and identify the runtime components and how control and data move between them
+3. Model them with the architecture schema below. Reuse existing node names when a component is already in the graph (merging an existing name updates it)
+4. Merge into the graph via the merge API as you go, in batches. Check each response: "skipped_relationships" lists edges whose endpoints matched no node, so add those nodes or fix the names
+5. Return everything you mapped as JSON at the end
+
+ARCHITECTURE SCHEMA
+Node types:
+  Orchestrator - coordinates other agents or steps: schedules, routes, decides who acts
+  Agent        - an autonomous worker with its own loop or decision logic
+  Tool         - a function or service an agent calls to act or observe
+  Channel      - queue, event bus, websocket, pubsub topic or stream that carries messages
+  Store        - database, cache, file or on-chain state that holds data
+  Gate         - a check that must pass before something runs: risk limit, approval, policy, kill switch
+  External     - an outside system: exchange, chain RPC, third-party API
+  Use Concept or Mechanism only for cross-cutting patterns that aren't a single component.
+Relationship types (directed, from -> to):
+  DISPATCHES_TO  hands work to an agent or tool
+  REPORTS_TO     sends results or status back
+  PUBLISHES_TO   writes messages to a channel
+  SUBSCRIBES_TO  consumes messages from a channel
+  READS, WRITES  reads or writes a store
+  CALLS          synchronous call to a tool or external system
+  GATES          the gate must pass before the target runs
+Give every node and relationship an "evidence" field with file:line.
+
+Return JSON:
+{
+  "summary": "Brief description of the architecture you mapped",
+  "nodes": [
+    {"name": "Main Orchestrator", "type": "Orchestrator", "description": "What it does and when", "evidence": "src/orchestrator.js:42"}
+  ],
+  "relationships": [
+    {"from": "Main Orchestrator", "to": "Worker Agent", "type": "DISPATCHES_TO", "evidence": "src/orchestrator.js:88"}
+  ]
+}`;
 
     case "ground":
       return `You are analyzing a codebase to ground knowledge graph concepts in actual implementations.
@@ -2836,14 +2914,18 @@ TARGET CODEBASE: ${userPrompt.split(" ")[0]}
 CONCEPTS TO GROUND:
 ${userPrompt.includes("CONCEPTS:") ? userPrompt.split("CONCEPTS:")[1] : "Read concepts from the graph API: curl -s http://localhost:8765/v1/graph"}
 
+${readOnlyNote}
+
 INSTRUCTIONS:
-1. Read the full graph (curl http://localhost:8765/v1/graph) to get all concepts and their descriptions
+1. Read the graph to get all concepts and their descriptions
 2. For each concept, search the codebase for actual implementations
 3. Find specific files, functions, classes that implement the concept
 4. Determine if the concept is: IMPLEMENTED, PARTIAL, or NOT_FOUND
 5. Extract code references (file:line) for implemented concepts
 6. Note any gaps between the concept and implementation
-7. Update grounded concepts in the graph via POST http://localhost:8765/v1/graph/merge with evidence data
+7. Don't write grounding to the graph yourself: return it as JSON below and the app records it on each node
+
+Concepts marked [Proposal] are proposed changes that aren't expected to exist yet. For them NOT_FOUND means "not built yet", which is fine: put the files and functions the change would touch in codeReferences, and the smallest first step in suggestedImprovements.
 
 Return a JSON response with grounding analysis:
 {
@@ -2957,15 +3039,18 @@ WRITING TO THE GRAPH (add new knowledge):
   curl -s -X POST "http://localhost:8765/v1/graph/merge?id=${gid}" \\
     -H "Content-Type: application/json" \\
     -d '{"nodes": [...], "relationships": [...]}'
-    → Merges new nodes/relationships into the existing graph (deduplicates by name)
-    Node format: {"id": int, "name": "Name", "type": "Type", "labels": ["Type"], "properties": {"name": "Name", "description": "..."}}
-    Relationship format: {"startNodeId": int, "endNodeId": int, "type": "RELATES_TO", "properties": {}}
+    → Merges into the existing graph. Nodes are matched by name: an existing name gets its properties updated, a new name is added
+    Node format: {"name": "Name", "type": "Type", "description": "..."}  (any other fields become properties)
+    Relationship format: {"from": "Node name", "to": "Node name", "type": "RELATES_TO"}  (any other fields become properties)
+      Relationships are directed (from → to). Endpoints can be node names (existing or in the same payload) or node ids.
+    Response reports added_nodes, updated_nodes, added_relationships, and skipped_relationships (endpoints that matched no node)
 
-REPLACING THE FULL GRAPH:
-  curl -s -X POST "http://localhost:8765/v1/graph?id=${gid}" \\
+REPLACING THE FULL GRAPH (avoid: prefer merge, which never loses anyone else's writes):
+  curl -s -X POST "http://localhost:8765/v1/graph?id=${gid}&base=UPDATED_AT" \\
     -H "Content-Type: application/json" \\
     -d '{"nodes": [...], "relationships": [...]}'
-    → Overwrites the entire graph (use with caution)
+    → Overwrites the entire graph. Pass base = the updated_at from the GET you edited; if anyone
+      wrote since, the server answers 409 and you must re-read and redo your change
 
 LISTING ALL GRAPHS:
   curl -s http://localhost:8765/v1/graphs
@@ -3003,8 +3088,19 @@ WORKFLOW:
     // Sync current graph to server first
     await syncToServer();
 
+    // Analysis and grounding run read-only, starting in the first path the prompt names
+    const readOnly = mode === "analyze" || mode === "ground";
+    const codebasePath = readOnly
+      ? prompt.match(/(?:^|\s)(~?\/\S+)/)?.[1].replace(/[.,;:)]+$/, "")
+      : undefined;
+
     // Execute Claude task
-    const result = await executeClaudeTask(fullPrompt, { async: true });
+    const result = await executeClaudeTask(fullPrompt, {
+      async: true,
+      label: `agent (${mode}): ${prompt}`,
+      readOnly,
+      workingDir: codebasePath,
+    });
 
     if (result.task_id) {
       const taskStartTime = Date.now();
@@ -3078,83 +3174,72 @@ WORKFLOW:
                     data.summary || "Task completed.",
                   );
 
-                  // Handle grounding results - update existing nodes with analysis
-                  if (data.groundingResults?.length > 0) {
-                    let groundedCount = 0;
-                    for (const result of data.groundingResults) {
-                      // Find the node by name
-                      const node = merged_object.nodes.find(
-                        (n) =>
-                          (n.name || n.properties?.name) === result.conceptName,
+                  // Record results through the server merge (matches nodes by name,
+                  // resolves relationships by name); the pull below brings them into view.
+                  // Editing merged_object here would be overwritten by that pull.
+                  const payload = { nodes: [], relationships: [] };
+                  const nodeNames = new Set(
+                    merged_object.nodes.map((n) => n.name || n.properties?.name),
+                  );
+
+                  // Grounding results update existing nodes
+                  for (const g of data.groundingResults || []) {
+                    if (!nodeNames.has(g.conceptName)) continue;
+                    payload.nodes.push({
+                      name: g.conceptName,
+                      grounding: JSON.stringify({
+                        status: g.status,
+                        analysis: g.analysis,
+                        codeReferences: g.codeReferences || [],
+                        implementationNotes: g.implementationNotes,
+                        suggestedImprovements: g.suggestedImprovements,
+                        groundedAt: Date.now(),
+                        groundedBy: "claude-code",
+                      }),
+                    });
+                  }
+                  const groundedCount = payload.nodes.length;
+
+                  for (const { connectsTo, ...n } of data.nodes || []) {
+                    payload.nodes.push({ type: "Concept", ...n });
+                    []
+                      .concat(connectsTo || [])
+                      .join(",")
+                      .split(",")
+                      .map((s) => s.trim())
+                      .filter(Boolean)
+                      .forEach((to) =>
+                        payload.relationships.push({ from: n.name, to, type: "CONNECTS_TO" }),
                       );
-                      if (node) {
-                        // Store grounding data on the node
-                        node.grounding = {
-                          status: result.status,
-                          analysis: result.analysis,
-                          codeReferences: result.codeReferences || [],
-                          implementationNotes: result.implementationNotes,
-                          suggestedImprovements: result.suggestedImprovements,
-                          groundedAt: Date.now(),
-                          groundedBy: "claude-code",
-                        };
-                        // Also store in properties for IndexedDB persistence
-                        node.properties = node.properties || {};
-                        node.properties.grounding = JSON.stringify(
-                          node.grounding,
-                        );
-                        groundedCount++;
-                      }
-                    }
+                  }
+                  payload.relationships.push(...(data.relationships || []));
+
+                  if (payload.nodes.length || payload.relationships.length) {
+                    const stats = await mergeIntoServerGraph(payload);
                     if (groundedCount > 0) {
-                      console.log(`Grounded ${groundedCount} nodes`);
-                      renderGraph(merged_object);
-                      triggerAutoSave();
                       addChatMessage(
                         "system",
                         `Grounded ${groundedCount} concepts in codebase.`,
                       );
                     }
-                  }
-
-                  // Merge new nodes if any
-                  if (data.nodes?.length > 0) {
-                    const newGraph = {
-                      nodes: data.nodes.map((n, i) => ({
-                        id: 2000 + i,
-                        name: n.name,
-                        description: n.description,
-                        type: n.type || "Concept",
-                        labels: [n.type || "Concept"],
-                        properties: {
-                          name: n.name,
-                          description: n.description,
-                          // Convert array to comma-separated string
-                          connectsTo: Array.isArray(n.connectsTo)
-                            ? n.connectsTo.join(", ")
-                            : n.connectsTo || "",
-                        },
-                      })),
-                      relationships: data.relationships || [],
-                    };
-
-                    console.log("Merging nodes:", newGraph.nodes.length);
-                    mergeNewNodes(newGraph, null, "claude-code");
-                    renderGraph(merged_object);
-                    triggerAutoSave(); // Save to IndexedDB
+                    if (data.nodes?.length || data.relationships?.length) {
+                      const skipped = stats.skipped_relationships.length;
+                      addChatMessage(
+                        "system",
+                        `Graph: +${stats.added_nodes} nodes, ${stats.updated_nodes} updated, ` +
+                          `+${stats.added_relationships} relationships` +
+                          (skipped ? `, ${skipped} skipped (endpoint not found)` : "") +
+                          ".",
+                      );
+                    }
 
                     // Update task message with node count
                     const taskMsg = chatHistory.find(
                       (m) => m.taskId === result.task_id,
                     );
                     if (taskMsg) {
-                      taskMsg.nodesAdded = data.nodes.length;
+                      taskMsg.nodesAdded = stats.added_nodes;
                     }
-
-                    addChatMessage(
-                      "system",
-                      `Added ${data.nodes.length} new nodes to graph.`,
-                    );
                   }
                 } else {
                   // No JSON, just show response
@@ -3244,8 +3329,10 @@ async function groundAllNodes(codebasePath, batchSize = 5) {
     return;
   }
 
-  // Find ungrounded nodes
-  const ungroundedNodes = merged_object.nodes.filter((n) => !n.grounding);
+  // Find ungrounded nodes (grounding lives in properties once saved)
+  const ungroundedNodes = merged_object.nodes.filter(
+    (n) => !n.grounding && !n.properties?.grounding,
+  );
 
   if (ungroundedNodes.length === 0) {
     addChatMessage("system", "All nodes are already grounded!");
@@ -3280,7 +3367,7 @@ async function groundAllNodes(codebasePath, batchSize = 5) {
           0,
           150,
         );
-        return `- ${name}: ${desc}`;
+        return `- ${isProposalNode(n) ? "[Proposal] " : ""}${name}: ${desc}`;
       })
       .join("\n");
 
@@ -3923,6 +4010,8 @@ Be thorough - this is about creating a RICHER, more connected knowledge graph, n
       body: JSON.stringify({
         prompt: mergePrompt,
         model: getSelectedModel(),
+        effort: getSelectedEffort(),
+        ...activityMeta("merge graphs"),
       }),
     });
 

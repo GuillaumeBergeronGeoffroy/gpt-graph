@@ -15,7 +15,7 @@ ATTACHMENTS_DIR = os.path.expanduser('~/.gpt-graph/attachments')
 from graphs import (
     GRAPHS_DIR, AGENT_GRAPHS_DIR,
     load_graph_state, save_graph_state, delete_graph,
-    merge_into_graph, list_graphs,
+    merge_into_graph, list_graphs, StaleGraphError,
     search_nodes, get_node_with_neighbors, get_nodes_by_relation,
     get_graph_labels, traverse_graph
 )
@@ -23,6 +23,7 @@ from claude_task import (
     CLAUDE_BINARY, active_tasks, create_task, get_tasks_for_workspace,
     call_claude, execute_claude_task, start_task_async
 )
+import activity
 from thinking_loop import (
     ThinkingLoop, get_workspace_dir, list_workspaces,
     create_workspace, delete_workspace
@@ -51,6 +52,17 @@ def broadcast_sse(event_type, data):
                 dead.append(client)
         for d in dead:
             _sse_clients.remove(d)
+
+
+# Open tabs see every call, task and merge as it starts and ends
+activity.subscribe(lambda snap: broadcast_sse('activity', snap))
+
+
+def _merge_detail(stats):
+    parts = [f"+{stats['added_nodes']} nodes" if stats['added_nodes'] else '',
+             f"{stats['updated_nodes']} updated" if stats['updated_nodes'] else '',
+             f"+{stats['added_relationships']} links" if stats['added_relationships'] else '']
+    return ', '.join(p for p in parts if p) or 'no changes'
 
 
 def get_loop(workspace='default'):
@@ -96,6 +108,18 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
         workspace = params.get('workspace', 'default')
         return get_workspace_dir(workspace)
 
+    def _broadcast_client_graph(self, action, graph_id, graph, added_nodes=0):
+        """Tell open Gestalt tabs a client graph changed, so they pull it in instead of overwriting it."""
+        broadcast_sse('graph_update', {
+            'scope': 'client',
+            'action': action,
+            'graph_id': graph_id,
+            'updated_at': graph.get('updated_at'),
+            'node_count': len(graph.get('nodes', [])),
+            'relationship_count': len(graph.get('relationships', [])),
+            'added_nodes': added_nodes
+        })
+
     def _json_response(self, code, data):
         self.send_response(code)
         self.send_header('Content-Type', 'application/json')
@@ -124,12 +148,20 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                     messages = request['messages']
                     prompt = '\n'.join([m.get('content', '') for m in messages])
 
-                model = request.get('model', 'claude-opus-4-8')
+                model = request.get('model', 'claude-opus-5-5')
                 if 'gpt' in model or 'davinci' in model:
-                    model = 'claude-opus-4-8'
+                    model = 'claude-opus-5-5'
+                effort = request.get('effort')
 
                 print(f"Calling Claude with prompt length: {len(prompt)}")
-                response_text = call_claude(prompt, model)
+                activity_id = activity.start('call', request.get('graph_id'), activity.request_meta(request),
+                                             model=model, effort=effort)
+                try:
+                    response_text = call_claude(prompt, model, effort)
+                except Exception:
+                    activity.finish(activity_id, 'failed')
+                    raise
+                activity.finish(activity_id)
 
                 self._json_response(200, {
                     "id": "claude-response",
@@ -149,7 +181,10 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                 request = self._read_body()
                 prompt = request.get('prompt', '')
                 working_dir = request.get('working_dir', None)
-                model = request.get('model', 'claude-opus-4-8')
+                model = request.get('model', 'claude-opus-5-5')
+                effort = request.get('effort')
+                read_only = bool(request.get('read_only'))
+                graph_writes = request.get('graph_writes', True) is not False
                 async_mode = request.get('async', True)
                 task_graph_id = request.get('graph_id', graph_id)
                 task_workspace = request.get('workspace', params.get('workspace', 'default'))
@@ -168,16 +203,23 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                 })
 
                 print(f"Starting task {task_id} (graph: {task_graph_id}) with prompt length: {len(prompt)}")
+                activity_id = activity.start('task', task_graph_id, activity.request_meta(request),
+                                             model=model, effort=effort, task_id=task_id)
+                end_activity = lambda status: activity.finish(activity_id, 'done' if status == 'completed' else 'failed')
 
                 if async_mode:
-                    start_task_async(prompt, working_dir, model, task_id)
+                    start_task_async(prompt, working_dir, model, task_id, effort, read_only, graph_writes,
+                                     on_done=end_activity)
                     self._json_response(202, {
                         "task_id": task_id,
                         "status": "starting",
                         "message": f"Task started. Poll /v1/tasks/{task_id} for status."
                     })
                 else:
-                    result = execute_claude_task(prompt, working_dir, model, task_id)
+                    try:
+                        result = execute_claude_task(prompt, working_dir, model, task_id, effort, read_only, graph_writes)
+                    finally:
+                        end_activity(active_tasks[task_id].get('status'))
                     self._json_response(200, result)
 
             except Exception as e:
@@ -188,12 +230,18 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
         elif path == '/v1/graph':
             try:
                 graph = self._read_body()
-                save_graph_state(graph, graph_id)
+                # base: the updated_at of the copy the caller edited; a newer copy on disk is a conflict
+                base = params.get('base')
+                saved = save_graph_state(graph, graph_id, base_updated_at=float(base) if base else None)
+                self._broadcast_client_graph('save', graph_id, saved)
                 self._json_response(200, {
                     "status": "saved",
                     "node_count": len(graph.get('nodes', [])),
-                    "relationship_count": len(graph.get('relationships', []))
+                    "relationship_count": len(graph.get('relationships', [])),
+                    "updated_at": saved['updated_at']
                 })
+            except StaleGraphError as e:
+                self._json_response(409, {"error": {"message": str(e)}, "updated_at": e.updated_at})
             except Exception as e:
                 print(f"Graph save error: {e}")
                 self._json_response(500, {"error": {"message": str(e)}})
@@ -201,12 +249,15 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
         elif path == '/v1/graph/merge':
             try:
                 new_data = self._read_body()
-                updated_graph = merge_into_graph(new_data, graph_id)
+                updated_graph, stats = merge_into_graph(new_data, graph_id)
+                self._broadcast_client_graph('merge', graph_id, updated_graph, stats['added_nodes'])
+                activity.record('write', graph_id, activity.request_meta({}, params), detail=_merge_detail(stats))
                 self._json_response(200, {
                     "status": "merged",
                     "node_count": len(updated_graph.get('nodes', [])),
                     "relationship_count": len(updated_graph.get('relationships', [])),
-                    "added_nodes": len(new_data.get('nodes', []))
+                    "updated_at": updated_graph.get('updated_at'),
+                    **stats
                 })
             except Exception as e:
                 print(f"Graph merge error: {e}")
@@ -237,7 +288,7 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
             try:
                 new_data = self._read_body()
                 workspace_dir = self._workspace_dir(params)
-                updated_graph = merge_into_graph(new_data, graph_id, workspace_dir)
+                updated_graph, stats = merge_into_graph(new_data, graph_id, workspace_dir)
                 # Broadcast graph update to connected clients
                 broadcast_sse('graph_update', {
                     'action': 'merge',
@@ -245,12 +296,13 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                     'workspace': params.get('workspace', 'default'),
                     'node_count': len(updated_graph.get('nodes', [])),
                     'relationship_count': len(updated_graph.get('relationships', [])),
-                    'added_nodes': len(new_data.get('nodes', []))
+                    'added_nodes': stats['added_nodes']
                 })
                 self._json_response(200, {
                     "status": "merged",
                     "node_count": len(updated_graph.get('nodes', [])),
-                    "relationship_count": len(updated_graph.get('relationships', []))
+                    "relationship_count": len(updated_graph.get('relationships', [])),
+                    **stats
                 })
             except Exception as e:
                 self._json_response(500, {"error": {"message": str(e)}})
@@ -286,7 +338,8 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                 result = loop.configure(
                     prompt=req.get('prompt'),
                     interval=req.get('interval'),
-                    model=req.get('model')
+                    model=req.get('model'),
+                    effort=req.get('effort')
                 )
                 self._json_response(200, result)
             except Exception as e:
@@ -352,7 +405,13 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
         graph_id = self._graph_id(params)
 
         if path == '/health':
-            self._json_response(200, {"status": "ok", "claude_binary": CLAUDE_BINARY})
+            # features: lets clients (the gestalt-graph skill) check this server has what they need
+            self._json_response(200, {"status": "ok", "claude_binary": CLAUDE_BINARY,
+                                      "features": ["graph_meta", "no_write_jobs", "stale_save_check", "activity"]})
+
+        elif path == '/v1/activity':
+            # What is in flight (and just finished) on every graph; open tabs also get it live as 'activity' events
+            self._json_response(200, activity.snapshot())
 
         elif path == '/v1/graphs':
             self._json_response(200, {"graphs": list_graphs()})

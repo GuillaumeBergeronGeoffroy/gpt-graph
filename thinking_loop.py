@@ -112,7 +112,8 @@ class ThinkingLoop:
         self.thread = None
         self.prompt = ""
         self.interval = 0
-        self.model = "claude-opus-4-8"
+        self.model = "claude-opus-5-5"
+        self.effort = ""
         self.iteration = 0
         self.current_task_id = None
         self.actions = self._load_actions()
@@ -144,7 +145,8 @@ class ThinkingLoop:
                     cfg = json.load(f)
                     self.prompt = cfg.get('prompt', '')
                     self.interval = cfg.get('interval', 0)
-                    self.model = cfg.get('model', 'claude-opus-4-8')
+                    self.model = cfg.get('model', 'claude-opus-5-5')
+                    self.effort = cfg.get('effort', '')
             except Exception:
                 pass
 
@@ -156,6 +158,7 @@ class ThinkingLoop:
                 'prompt': self.prompt,
                 'interval': self.interval,
                 'model': self.model,
+                'effort': self.effort,
                 'workspace': self.workspace
             }, f, indent=2)
 
@@ -365,15 +368,17 @@ GUIDELINES:
         self._broadcast_sse('status', {'running': False, 'iteration': self.iteration})
         return {"status": "stopped"}
 
-    def configure(self, prompt=None, interval=None, model=None):
+    def configure(self, prompt=None, interval=None, model=None, effort=None):
         if prompt is not None:
             self.prompt = prompt
         if interval is not None:
             self.interval = interval
         if model is not None:
             self.model = model
+        if effort is not None:
+            self.effort = effort
         self._save_config()
-        return {"prompt": self.prompt, "interval": self.interval, "model": self.model, "workspace": self.workspace}
+        return {"prompt": self.prompt, "interval": self.interval, "model": self.model, "effort": self.effort, "workspace": self.workspace}
 
     def status(self):
         return {
@@ -418,7 +423,8 @@ GUIDELINES:
                     full_prompt,
                     working_dir=None,
                     model=self.model,
-                    task_id=task_id
+                    task_id=task_id,
+                    effort=self.effort
                 )
                 response = result.get('response', '')
                 exit_code = result.get('exit_code', -1)

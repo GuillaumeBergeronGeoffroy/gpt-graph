@@ -338,6 +338,103 @@
     color: #888;
     font-weight: 500;
   }
+  #activity {
+    position: fixed;
+    top: 98px;
+    right: 20px;
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 11px;
+  }
+  #activity-pill {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    cursor: pointer;
+    color: #666;
+    background: rgba(22, 22, 26, 0.9);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 6px;
+    padding: 6px 12px;
+    user-select: none;
+  }
+  #activity.busy #activity-pill {
+    color: #aaa;
+    border-color: rgba(76, 175, 80, 0.3);
+  }
+  .activity-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.2);
+  }
+  #activity.busy .activity-dot {
+    background: #4caf50;
+    animation: live-pulse 2s infinite;
+  }
+  #activity-panel {
+    display: none;
+    margin-top: 6px;
+    width: 340px;
+    max-height: 45vh;
+    overflow-y: auto;
+    background: rgba(22, 22, 26, 0.95);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    padding: 4px 12px 8px;
+  }
+  #activity.open #activity-panel {
+    display: block;
+  }
+  .activity-heading {
+    margin-top: 8px;
+    color: #555;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+  }
+  .activity-empty {
+    padding: 5px 0;
+    color: #444;
+  }
+  .activity-row {
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+  }
+  .activity-row:last-child {
+    border-bottom: none;
+  }
+  .activity-what {
+    color: #ccc;
+    line-height: 1.35;
+    word-break: break-word;
+  }
+  .activity-row.done .activity-what {
+    color: #888;
+  }
+  .activity-row.failed .activity-what {
+    color: #ef5350;
+  }
+  .activity-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    margin-top: 2px;
+    color: #555;
+  }
+  .activity-who {
+    color: rgba(206, 147, 216, 0.8);
+  }
+  .activity-who.mine {
+    color: #64b5f6;
+  }
   text {
     pointer-events: none;
   }
@@ -572,7 +669,8 @@
     border-color: rgba(255,255,255,0.1);
   }
 
-  /* Clear button */
+  /* Settings and Clear buttons */
+  #settings-button,
   #clear-button {
     margin-top: 10px;
     padding: 10px;
@@ -586,6 +684,11 @@
     background: rgba(255,255,255,0.03);
     border: 1px solid rgba(255,255,255,0.06);
     color: rgba(255,255,255,0.4);
+  }
+  #settings-button:hover {
+    color: rgba(255,255,255,0.8);
+    background: rgba(255,255,255,0.08);
+    border-color: rgba(255,255,255,0.1);
   }
   #clear-button:hover {
     color: #ef9a9a;
@@ -951,6 +1054,40 @@
       line-height: 1.6;
       max-height: 100px;
       overflow-y: auto;
+    }
+
+    /* Proposal styles */
+    .popup-proposal {
+      border-top: 1px solid rgba(255, 179, 0, 0.3);
+      padding: 12px 16px;
+      background: rgba(255, 179, 0, 0.06);
+    }
+    .proposal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .proposal-kind {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #ffb300;
+    }
+    .proposal-status {
+      background: rgba(255, 255, 255, 0.08);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 6px;
+      padding: 2px 6px;
+      font-size: 12px;
+    }
+    .proposal-field {
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.8);
+      line-height: 1.5;
+      margin-bottom: 6px;
     }
 
     /* Grounding styles */

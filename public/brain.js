@@ -60,6 +60,7 @@ function connectBrainSSE() {
   // Refresh graphs immediately when agent updates them
   brainSSE.addEventListener('graph_update', (e) => {
     const data = JSON.parse(e.data);
+    if (data.scope === 'client' && data.action === 'save') return; // the UI's own autosaves
     console.log('Graph updated:', data);
     appendBrainAction({
       type: 'graph_update',

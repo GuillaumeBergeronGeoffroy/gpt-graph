@@ -6,6 +6,21 @@ let currentZoom = null;
 let currentSvg = null;
 let currentNodes = []; // Nodes with positions from D3 simulation
 
+// Proposals: generated nodes describing a change to the graph's real components
+const PROPOSAL_STATUSES = ['proposed', 'testing', 'adopted', 'rejected'];
+const PROPOSAL_EDGE_TYPES = new Set(['PROPOSES_CHANGE_TO', 'EXTENDS', 'REPLACES', 'TESTS', 'MITIGATES']);
+const PROPOSAL_COLOR = '#ffb300';
+
+function isProposalNode(d) {
+    return d.labels?.[0] === 'Proposal';
+}
+
+// Faded: rejected proposals, and components or edges a merged PR removed from the code
+function getNodeOpacity(d) {
+    if (d.properties?.removed_in) return 0.3;
+    return isProposalNode(d) && d.properties?.status === 'rejected' ? 0.35 : 1;
+}
+
 function renderGraph(neo4jJson, history = false) {
     neo4jJson = JSON.parse(JSON.stringify(neo4jJson));
 
@@ -23,6 +38,22 @@ function renderGraph(neo4jJson, history = false) {
 
     const width = parseInt(svg.style("width"));
     const height = parseInt(svg.style("height"));
+
+    // Arrowheads: relationships are directed (start → end)
+    const defs = svg.append("defs");
+    [["arrow", "rgba(255,255,255,0.6)"], ["arrow-proposal", PROPOSAL_COLOR]].forEach(([id, color]) => {
+        defs.append("marker")
+            .attr("id", id)
+            .attr("viewBox", "0 -5 10 10")
+            .attr("refX", 10)
+            .attr("markerUnits", "userSpaceOnUse")
+            .attr("markerWidth", 9)
+            .attr("markerHeight", 9)
+            .attr("orient", "auto")
+            .append("path")
+            .attr("d", "M0,-5L10,0L0,5")
+            .attr("fill", color);
+    });
 
     // Add zoom behavior
     const g = svg.append("g");
@@ -125,8 +156,11 @@ function renderGraph(neo4jJson, history = false) {
         .selectAll("line")
         .data(neo4jJson.relationships)
         .join("line")
-        .attr("stroke", d => `rgba(255,255,255,${getLinkOpacity(d)})`)
-        .attr("stroke-width", d => getLinkWidth(d));
+        .attr("stroke", d => PROPOSAL_EDGE_TYPES.has(d.type) ? PROPOSAL_COLOR : `rgba(255,255,255,${getLinkOpacity(d)})`)
+        .attr("stroke-width", d => getLinkWidth(d))
+        .attr("stroke-dasharray", d => PROPOSAL_EDGE_TYPES.has(d.type) ? "6,4" : null)
+        .attr("marker-end", d => PROPOSAL_EDGE_TYPES.has(d.type) ? "url(#arrow-proposal)" : "url(#arrow)")
+        .attr("stroke-opacity", d => d.properties?.removed_in ? 0.25 : 1);
 
     // Color palette by label
     const labelColors = {
@@ -139,7 +173,16 @@ function renderGraph(neo4jJson, history = false) {
         'Concept': '#ab47bc',
         'Object': '#8d6e63',
         'Action': '#ef5350',
-        'Synthesis': '#ffd700'  // Gold for synthesized concepts
+        'Synthesis': '#ffd700',  // Gold for synthesized concepts
+        'Proposal': PROPOSAL_COLOR,
+        // Architecture components (from /analyze)
+        'Orchestrator': '#5c6bc0',
+        'Agent': '#42a5f5',
+        'Tool': '#26a69a',
+        'Channel': '#78909c',
+        'Store': '#a1887f',
+        'Gate': '#e57373',
+        'External': '#bdbdbd'
     };
 
     function getNodeColor(d) {
@@ -159,7 +202,8 @@ function renderGraph(neo4jJson, history = false) {
         if (grounding) {
             if (grounding.status === 'IMPLEMENTED') return "#4ade80";
             if (grounding.status === 'PARTIAL') return "#fbbf24";
-            if (grounding.status === 'NOT_FOUND') return "#f87171";
+            // A proposal not found in code is simply not built yet
+            if (grounding.status === 'NOT_FOUND') return isProposalNode(d) ? "#60a5fa" : "#f87171";
         }
 
         // Fall back to audit verdict
@@ -172,7 +216,7 @@ function renderGraph(neo4jJson, history = false) {
     }
 
     function getGroundingStrokeWidth(d) {
-        const hasGrounding = d.grounding || (d.properties?.grounding && d.properties.grounding.startsWith('{'));
+        const hasGrounding = d.grounding || (typeof d.properties?.grounding === 'string' && d.properties.grounding.startsWith('{'));
         const hasAudit = d.properties?._groundingVerdict;
         return (hasGrounding || hasAudit) ? 3 : 2;
     }
@@ -185,6 +229,7 @@ function renderGraph(neo4jJson, history = false) {
         .attr("fill", d => getNodeColor(d))
         .attr("stroke", d => getGroundingStroke(d))
         .attr("stroke-width", d => getGroundingStrokeWidth(d))
+        .attr("opacity", d => getNodeOpacity(d))
         .style("cursor", "pointer")
         .on("click", (event, d) => {
             event.stopPropagation();
@@ -216,12 +261,21 @@ function renderGraph(neo4jJson, history = false) {
     simulation.force("link").links(neo4jJson.relationships);
     simulation.alpha(1).restart();
 
+    // Stop each line at the target's edge so its arrowhead stays visible
+    function linkEnd(d) {
+        const dx = d.target.x - d.source.x;
+        const dy = d.target.y - d.source.y;
+        const dist = Math.hypot(dx, dy) || 1;
+        const inset = Math.min(dist, getNodeRadius(d.target) + 3);
+        return { x: d.target.x - dx / dist * inset, y: d.target.y - dy / dist * inset };
+    }
+
     function ticked() {
         link
             .attr("x1", d => d.source.x)
             .attr("y1", d => d.source.y)
-            .attr("x2", d => d.target.x)
-            .attr("y2", d => d.target.y);
+            .attr("x2", d => linkEnd(d).x)
+            .attr("y2", d => linkEnd(d).y);
 
         node
             .attr("cx", d => d.x)
@@ -513,15 +567,17 @@ function showNodePopup(node, event) {
     }
 
     if (grounding) {
+        // For a proposal, NOT_FOUND means not built yet rather than missing
+        const notBuilt = grounding.status === 'NOT_FOUND' && isProposalNode(node);
         const statusColors = {
             'IMPLEMENTED': '#4ade80',
             'PARTIAL': '#fbbf24',
-            'NOT_FOUND': '#f87171'
+            'NOT_FOUND': notBuilt ? '#60a5fa' : '#f87171'
         };
         const statusIcons = {
             'IMPLEMENTED': '✓',
             'PARTIAL': '◐',
-            'NOT_FOUND': '✗'
+            'NOT_FOUND': notBuilt ? '○' : '✗'
         };
 
         let referencesHtml = '';
@@ -544,7 +600,7 @@ function showNodePopup(node, event) {
             <div class="popup-grounding">
                 <div class="grounding-header">
                     <span class="grounding-status" style="color: ${statusColors[grounding.status] || '#888'}">
-                        ${statusIcons[grounding.status] || '?'} ${grounding.status || 'Unknown'}
+                        ${statusIcons[grounding.status] || '?'} ${notBuilt ? 'NOT BUILT YET' : grounding.status || 'Unknown'}
                     </span>
                     <span class="grounding-date">${grounding.groundedAt ? new Date(grounding.groundedAt).toLocaleDateString() : ''}</span>
                 </div>
@@ -552,6 +608,26 @@ function showNodePopup(node, event) {
                 ${referencesHtml}
                 ${grounding.implementationNotes ? `<div class="grounding-notes"><strong>Notes:</strong> ${grounding.implementationNotes}</div>` : ''}
                 ${grounding.suggestedImprovements ? `<div class="grounding-improvements"><strong>Suggested:</strong> ${grounding.suggestedImprovements}</div>` : ''}
+            </div>
+        `;
+    }
+
+    // Proposal section: what it claims, how to test it, and where it stands
+    let proposalHtml = '';
+    if (isProposalNode(node)) {
+        const p = node.properties;
+        const status = p.status || 'proposed';
+        proposalHtml = `
+            <div class="popup-proposal">
+                <div class="proposal-header">
+                    <span class="proposal-kind">${p.kind || 'proposal'}</span>
+                    <select class="proposal-status" onchange="setProposalStatus(${node.id}, this.value)">
+                        ${PROPOSAL_STATUSES.map(s => `<option value="${s}" ${s === status ? 'selected' : ''}>${s}</option>`).join('')}
+                    </select>
+                </div>
+                ${p.hypothesis ? `<div class="proposal-field"><strong>Hypothesis:</strong> ${p.hypothesis}</div>` : ''}
+                ${p.mechanism ? `<div class="proposal-field"><strong>Mechanism:</strong> ${p.mechanism}</div>` : ''}
+                ${p.detection ? `<div class="proposal-field"><strong>Detection:</strong> ${p.detection}</div>` : ''}
             </div>
         `;
     }
@@ -569,6 +645,7 @@ function showNodePopup(node, event) {
         </div>
         <div class="popup-name">${node.properties.name || 'Unnamed'}</div>
         <div class="popup-description">${node.properties.description || 'No description'}</div>
+        ${proposalHtml}
         ${auditHtml}
         ${groundingHtml}
         ${connectionsHtml}
@@ -625,6 +702,18 @@ function showNodePopup(node, event) {
 function hideNodePopup() {
     const existing = document.getElementById('node-popup');
     if (existing) existing.remove();
+}
+
+function setProposalStatus(nodeId, status) {
+    const node = merged_object.nodes.find(n => n.id === nodeId);
+    if (!node) return;
+    node.properties.status = status;
+    // Update the rendered copy in place rather than re-running the layout
+    d3.select("#graph").selectAll("circle")
+        .filter(d => d?.id === nodeId)
+        .each(d => { d.properties.status = status; })
+        .attr("opacity", d => getNodeOpacity(d));
+    triggerAutoSave();
 }
 
 function clearNodeSelection(nodeSelection) {
@@ -736,7 +825,7 @@ function batchResearch() {
     setLoading();
 
     const prompt = getBatchResearchPrompt(selectedNodes);
-    callClaude(prompt)
+    callClaude(prompt, `batch research: ${names.length} nodes`)
         .then(newGraph => {
             mergeNewNodes(newGraph, null, 'batch-research');
             renderGraph(merged_object);
@@ -763,7 +852,7 @@ function batchExpand() {
     setLoading();
 
     const prompt = getBatchExpandPrompt(selectedNodes);
-    callClaude(prompt)
+    callClaude(prompt, `batch expand: ${names.length} nodes`)
         .then(newGraph => {
             mergeNewNodes(newGraph, null, 'batch-expand');
             renderGraph(merged_object);
