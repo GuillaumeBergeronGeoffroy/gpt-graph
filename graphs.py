@@ -80,6 +80,9 @@ def save_graph_state(state, graph_id='default', base_dir=None, base_updated_at=N
         if 'created_at' not in state:
             # Preserve existing created_at from disk, or set now
             state['created_at'] = (existing or {}).get('created_at', now)
+        if 'meta' not in state and (existing or {}).get('meta'):
+            # The UI saves whole graphs without meta (e.g. the commit a refresh analyzed); keep it
+            state['meta'] = existing['meta']
         state['updated_at'] = now
         _write_json(path, state)
         return state

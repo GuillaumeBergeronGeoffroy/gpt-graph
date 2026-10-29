@@ -171,6 +171,12 @@ class RefreshSupportTest(unittest.TestCase):
         merge_into_graph({'meta': {'analyzed_at': 'now'}}, 'g', self.base)
         self.assertEqual(load_graph_state('g', self.base)['meta'], {'analyzed_commit': 'abc', 'analyzed_at': 'now'})
 
+    def test_a_full_save_without_meta_keeps_it(self):
+        merge_into_graph({'meta': {'analyzed_commit': 'abc'}}, 'g', self.base)
+        ui_copy = {k: v for k, v in load_graph_state('g', self.base).items() if k != 'meta'}
+        save_graph_state(ui_copy, 'g', self.base)
+        self.assertEqual(load_graph_state('g', self.base)['meta'], {'analyzed_commit': 'abc'})
+
     def test_an_existing_edge_gets_its_properties_updated_not_duplicated(self):
         graph, stats = merge_into_graph({'relationships': [
             {'from': 'Floor', 'to': 'Real Desk', 'type': 'CALLS', 'removed_in': '#103', 'evidence': 'floor.js:99'}]},
